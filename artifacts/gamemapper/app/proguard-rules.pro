@@ -1,0 +1,3 @@
+-keep class com.gamemapper.models.** { *; }
+-keepattributes Signature
+-keepattributes *Annotation*

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="card_radius">16dp</dimen>
+    <dimen name="card_elevation">6dp</dimen>
+    <dimen name="card_margin">8dp</dimen>
+    <dimen name="screen_padding">16dp</dimen>
+    <dimen name="item_spacing">8dp</dimen>
+    <dimen name="text_title">22sp</dimen>
+    <dimen name="text_body">14sp</dimen>
+    <dimen name="text_caption">12sp</dimen>
+    <dimen name="color_strip_width">5dp</dimen>
+    <dimen name="badge_min_width">32dp</dimen>
+</resources>

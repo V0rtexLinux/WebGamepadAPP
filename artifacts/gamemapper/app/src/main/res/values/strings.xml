@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">GameMapper</string>
+    <string name="tagline">Mapeamento automático de controles</string>
+    <string name="enter_url">URL do jogo (ex: cpjourney.com)</string>
+    <string name="analyze">Analisar Jogo</string>
+    <string name="my_profiles">Meus Perfis</string>
+    <string name="analyzing">Analisando…</string>
+    <string name="controls_mapped">controles mapeados</string>
+    <string name="remap">🔄 Remapear</string>
+    <string name="cycle_layout">⊞ Mudar Layout</string>
+    <string name="share">⬆ Compartilhar</string>
+    <string name="no_profiles">Nenhum perfil ainda.\nAnalise um jogo para começar!</string>
+    <string name="btn_cpjourney">CPJourney</string>
+    <string name="btn_clubpenguin">Club Penguin</string>
+    <string name="cancel">Cancelar</string>
+    <string name="delete">Excluir</string>
+    <string name="open">Abrir</string>
+</resources>
