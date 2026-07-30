@@ -7,6 +7,7 @@ object Constants {
     const val EXTRA_GAME_URL = "extra_game_url"
     const val EXTRA_PROFILE_ID = "extra_profile_id"
     const val EXTRA_ANALYSIS_MODE = "extra_analysis_mode"
+    const val EXTRA_SOURCE_PROFILE_ID = "extra_source_profile_id"
 
     const val ANALYSIS_MODE_DEEP = 0      // full analysis
     const val ANALYSIS_MODE_QUICK = 1     // quick re-scan

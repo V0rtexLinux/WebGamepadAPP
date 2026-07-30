@@ -36,6 +36,7 @@ data class ControlProfile(
     @SerializedName("gameDomain") val gameDomain: String,
     @SerializedName("controls") val controls: List<ControlModel>,
     @SerializedName("createdAt") val createdAt: Long = System.currentTimeMillis(),
+    @SerializedName("updatedAt") val updatedAt: Long = System.currentTimeMillis(),
     @SerializedName("layoutStyle") val layoutStyle: Int = 0
 )
 

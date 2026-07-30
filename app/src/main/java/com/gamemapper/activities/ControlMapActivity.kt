@@ -53,6 +53,11 @@ class ControlMapActivity : AppCompatActivity() {
         binding.tvGameUrl.text = profile.gameUrl
         binding.tvControlCount.text = "${profile.controls.size} controles mapeados"
 
+        val relativeTime = android.text.format.DateUtils.getRelativeTimeSpanString(
+            profile.updatedAt, System.currentTimeMillis(), android.text.format.DateUtils.MINUTE_IN_MILLIS
+        )
+        binding.tvAutoSaved.text = "✓ Salvo automaticamente • $relativeTime"
+
         // Stats bar
         val movements = profile.controls.count { it.category == ControlCategory.MOVEMENT }
         val actions = profile.controls.count { it.category == ControlCategory.ACTION }
@@ -127,6 +132,7 @@ class ControlMapActivity : AppCompatActivity() {
             val intent = Intent(this, AnalyzerActivity::class.java)
             intent.putExtra(Constants.EXTRA_GAME_URL, profile.gameUrl)
             intent.putExtra(Constants.EXTRA_ANALYSIS_MODE, Constants.ANALYSIS_MODE_REMAP)
+            intent.putExtra(Constants.EXTRA_SOURCE_PROFILE_ID, profile.id)
             startActivity(intent)
             finish()
         }

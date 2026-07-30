@@ -25,6 +25,7 @@ class AnalyzerActivity : AppCompatActivity() {
     private lateinit var binding: ActivityAnalyzerBinding
     private var gameUrl: String = ""
     private var analysisMode: Int = Constants.ANALYSIS_MODE_DEEP
+    private var sourceProfileId: String? = null
     private var pageLoaded = false
     private val handler = Handler(Looper.getMainLooper())
 
@@ -36,6 +37,7 @@ class AnalyzerActivity : AppCompatActivity() {
 
         gameUrl = intent.getStringExtra(Constants.EXTRA_GAME_URL) ?: ""
         analysisMode = intent.getIntExtra(Constants.EXTRA_ANALYSIS_MODE, Constants.ANALYSIS_MODE_DEEP)
+        sourceProfileId = intent.getStringExtra(Constants.EXTRA_SOURCE_PROFILE_ID)
 
         if (gameUrl.isEmpty()) {
             Toast.makeText(this, "URL inválida", Toast.LENGTH_SHORT).show()
@@ -194,7 +196,7 @@ class AnalyzerActivity : AppCompatActivity() {
         controls: List<com.gamemapper.models.ControlModel>,
         json: String
     ) {
-        updateStatus("Pronto!", 100)
+        updateStatus("Pronto! Salvando automaticamente…", 100)
 
         val domain = try { java.net.URI(gameUrl).host ?: gameUrl } catch (e: Exception) { gameUrl }
         val gameTitle = try {
@@ -202,15 +204,21 @@ class AnalyzerActivity : AppCompatActivity() {
             obj.optString("title", domain).ifEmpty { domain }
         } catch (e: Exception) { domain }
 
+        // Auto-save: if this analysis originated from an existing profile (e.g. Remap),
+        // reuse its id so the saved profile is updated in place instead of duplicated.
+        val existing = sourceProfileId?.let { ProfileStorage.getProfile(this, it) }
         val profile = ControlProfile(
-            id = UUID.randomUUID().toString(),
+            id = existing?.id ?: sourceProfileId ?: UUID.randomUUID().toString(),
             name = gameTitle,
             gameUrl = gameUrl,
             gameDomain = domain,
             controls = controls,
+            createdAt = existing?.createdAt ?: System.currentTimeMillis(),
+            updatedAt = System.currentTimeMillis(),
             layoutStyle = analysisMode
         )
         ProfileStorage.saveProfile(this, profile)
+        updateStatus("Gamepad salvo automaticamente ✓", 100)
 
         handler.postDelayed({
             val intent = Intent(this, ControlMapActivity::class.java)
