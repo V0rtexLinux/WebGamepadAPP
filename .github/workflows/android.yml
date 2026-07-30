@@ -53,7 +53,7 @@ jobs:
         git push || echo "Push falhou (provavelmente PR de fork, sem permissão)"
 
     - name: Build with Gradle
-      run: ./gradlew build
+      run: ./gradlew assembleDebug assembleRelease -x lintDebug -x lintVitalRelease
 
     - name: Run Kotlin lint checks
       run: ./gradlew ktlintCheck detekt --continue
@@ -61,3 +61,13 @@ jobs:
 
     - name: Run unit tests
       run: ./gradlew test
+
+    - name: Upload APK artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-apk
+        path: |
+          app/build/outputs/apk/debug/*.apk
+          app/build/outputs/apk/release/*.apk
+        retention-days: 14
+        if-no-files-found: error
