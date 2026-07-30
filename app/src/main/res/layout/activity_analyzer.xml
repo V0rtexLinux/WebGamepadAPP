@@ -28,7 +28,7 @@
             android:layout_width="96dp"
             android:layout_height="96dp"
             android:src="@drawable/ic_radar"
-            android:tint="@color/accent"
+            app:tint="@color/accent"
             android:layout_marginBottom="32dp" />
 
         <TextView
