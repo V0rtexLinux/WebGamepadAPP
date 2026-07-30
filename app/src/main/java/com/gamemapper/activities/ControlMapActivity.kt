@@ -126,6 +126,15 @@ class ControlMapActivity : AppCompatActivity() {
     }
 
     private fun setupButtons() {
+        // Play button – open the game with the mapped controls active
+        binding.btnPlay.setOnClickListener {
+            val profile = ProfileStorage.getProfile(this, profileId) ?: return@setOnClickListener
+            val intent = Intent(this, GameplayActivity::class.java)
+            intent.putExtra(Constants.EXTRA_GAME_URL, profile.gameUrl)
+            intent.putExtra(Constants.EXTRA_PROFILE_ID, profile.id)
+            startActivity(intent)
+        }
+
         // Remap button – re-analyze with alternative strategy
         binding.btnRemap.setOnClickListener {
             val profile = ProfileStorage.getProfile(this, profileId) ?: return@setOnClickListener

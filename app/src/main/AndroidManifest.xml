@@ -46,6 +46,15 @@
             android:exported="false"
             android:screenOrientation="portrait" />
 
+        <activity
+            android:name=".activities.GameplayActivity"
+            android:exported="false"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustPan"
+            android:hardwareAccelerated="true"
+            android:theme="@style/Theme.GameMapper.Fullscreen" />
+
     </application>
 
 </manifest>

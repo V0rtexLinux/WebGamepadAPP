@@ -12,4 +12,12 @@ object Constants {
     const val ANALYSIS_MODE_DEEP = 0      // full analysis
     const val ANALYSIS_MODE_QUICK = 1     // quick re-scan
     const val ANALYSIS_MODE_REMAP = 2     // alternative layout
+
+    // Known CPPS quick-fill URLs
+    val CPPS_SHORTCUTS = listOf(
+        "CPJourney"     to "https://play.cpjourney.net",
+        "CPPS.app"      to "https://cpps.app/auth/login",
+        "Icer"          to "https://icer.ink",
+        "CP Legacy"     to "https://cplegacy.com"
+    )
 }

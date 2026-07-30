@@ -16,4 +16,10 @@
     <string name="cancel">Cancelar</string>
     <string name="delete">Excluir</string>
     <string name="open">Abrir</string>
+    <string name="play">▶ Jogar</string>
+    <string name="gameplay_back">Sair do jogo</string>
+    <string name="login_detected">Login detectado</string>
+    <string name="btn_cpps_app">CPPS.app</string>
+    <string name="btn_icer">Icer</string>
+    <string name="btn_cpl">CP Legacy</string>
 </resources>

@@ -121,11 +121,11 @@
                         android:textColor="@color/on_surface_medium"
                         android:textSize="12sp" />
 
-                    <LinearLayout
+                    <com.google.android.material.chip.ChipGroup
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:orientation="horizontal"
-                        android:layout_marginTop="8dp">
+                        android:layout_marginTop="8dp"
+                        app:chipSpacingHorizontal="6dp">
 
                         <com.google.android.material.chip.Chip
                             android:id="@+id/btnCpJourney"
@@ -142,14 +142,36 @@
                             android:id="@+id/btnClubPenguin"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_marginStart="8dp"
-                            android:text="Club Penguin"
+                            android:text="CPPS.app"
                             style="@style/Widget.MaterialComponents.Chip.Filter"
                             app:chipBackgroundColor="@color/surface_variant"
                             app:chipStrokeColor="@color/blue_ui"
                             app:chipStrokeWidth="1dp"
                             android:textColor="@color/on_surface_medium" />
-                    </LinearLayout>
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/btnIcer"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Icer"
+                            style="@style/Widget.MaterialComponents.Chip.Filter"
+                            app:chipBackgroundColor="@color/surface_variant"
+                            app:chipStrokeColor="@color/teal_mouse"
+                            app:chipStrokeWidth="1dp"
+                            android:textColor="@color/on_surface_medium" />
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/btnCpLegacy"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="CP Legacy"
+                            style="@style/Widget.MaterialComponents.Chip.Filter"
+                            app:chipBackgroundColor="@color/surface_variant"
+                            app:chipStrokeColor="@color/orange_interaction"
+                            app:chipStrokeWidth="1dp"
+                            android:textColor="@color/on_surface_medium" />
+
+                    </com.google.android.material.chip.ChipGroup>
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/btnAnalyze"

@@ -60,12 +60,18 @@ class MainActivity : AppCompatActivity() {
             } else false
         }
 
-        // Quick fill buttons for popular games
+        // Quick fill buttons for popular CPPS games
         binding.btnCpJourney.setOnClickListener {
-            binding.etUrl.setText("https://cpjourney.com")
+            binding.etUrl.setText("https://play.cpjourney.net")
         }
         binding.btnClubPenguin.setOnClickListener {
-            binding.etUrl.setText("https://cprewritten.net")
+            binding.etUrl.setText("https://cpps.app/auth/login")
+        }
+        binding.btnIcer.setOnClickListener {
+            binding.etUrl.setText("https://icer.ink")
+        }
+        binding.btnCpLegacy.setOnClickListener {
+            binding.etUrl.setText("https://cplegacy.com")
         }
     }
 
