@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: write
+
 jobs:
   build:
 
@@ -24,33 +27,21 @@ jobs:
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v4
 
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
-
-    - name: Verify Gradle wrapper jar integrity
-      id: wrapper_check
-      run: |
-        if [ ! -s gradle/wrapper/gradle-wrapper.jar ] || ! unzip -t gradle/wrapper/gradle-wrapper.jar > /dev/null 2>&1; then
-          echo "corrupted=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "corrupted=false" >> "$GITHUB_OUTPUT"
-        fi
-
     - name: Regenerate Gradle wrapper
-      if: steps.wrapper_check.outputs.corrupted == 'true'
       run: |
-        echo "gradle-wrapper.jar corrompido ou ausente — regenerando..."
         gradle wrapper --gradle-version 8.6 --distribution-type all
         chmod +x gradlew
 
-    - name: Commit regenerated wrapper
-      if: steps.wrapper_check.outputs.corrupted == 'true'
+    - name: Commit regenerated wrapper (if changed)
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
         git add gradle/wrapper/gradle-wrapper.jar gradle/wrapper/gradle-wrapper.properties gradlew gradlew.bat
-        git commit -m "ci: auto-fix corrupted gradle-wrapper.jar" || echo "Nada para commitar"
-        git push || echo "Push falhou (provavelmente PR de fork, sem permissão)"
+        git diff --cached --quiet && echo "Wrapper já está atualizado — nada para commitar" || (
+          git commit -m "ci: sync gradle wrapper"
+          git push
+        )
+      continue-on-error: true
 
     - name: Build with Gradle
       run: ./gradlew assembleDebug assembleRelease -x lintDebug -x lintVitalRelease
