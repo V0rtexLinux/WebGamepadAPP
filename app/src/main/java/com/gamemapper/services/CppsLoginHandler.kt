@@ -447,24 +447,28 @@ object CppsLoginHandler {
      *  • Second call → stops  the loop, returns "stopped"
      *
      * v2 — REACTIVE CURVES:
-     *   Cart Surfer's track only turns where a warning sign appears (the game
-     *   always shows 4 signs before a curve; missing the turn = crash). The
-     *   old version blindly pressed a Turn key on a fixed timer, which is
-     *   guesswork and eventually drifts out of sync and crashes the cart.
+     *   Cart Surfer's track only turns where warning signs appear (several
+     *   scroll into view before the actual curve; missing the turn = crash).
+     *   The old version blindly pressed a Turn key on a fixed timer, which
+     *   is guesswork and eventually drifts out of sync and crashes the cart.
      *
      *   This version samples the Ruffle/Phaser canvas pixels each tick,
-     *   estimates whether the track bends left or right by looking at where
-     *   the track-colored pixels are concentrated relative to the canvas
-     *   center, and presses LEFT/RIGHT only when a curve is actually
-     *   detected — decoupled from the scoring-trick timer.
+     *   looks for the yellow/gold chevron sign on the tunnel wall, and
+     *   reads its shape (wide base narrowing to a point) to tell which way
+     *   the upcoming curve bends. It waits for the sign to grow large/close
+     *   enough (see gmSetSignTriggerSize) before pressing LEFT/RIGHT, since
+     *   several signs are visible before the real bend.
      *
-     *   CALIBRATION REQUIRED: the default color range below is a guess and
-     *   must be tuned against the real game. While Cart Surfer is running,
-     *   call `gmCalibrateTrack()` in the devtools console — it logs sampled
-     *   RGB values from the detection band every second so you can find the
-     *   real track color, then lock it in with:
-     *     gmSetTrackColor(rMin, rMax, gMin, gMax, bMin, bMax)
-     *   Call `gmCalibrateTrack()` again to stop logging.
+     *   CALIBRATED FROM REAL SCREENSHOTS: the default sign color and band
+     *   position below were sampled directly from real gameplay captures
+     *   of this game (straight track vs. curve-with-sign), not guessed.
+     *   If a different server/skin uses different sign art, call
+     *   `gmCalibrateSign()` in the devtools console while playing — it
+     *   logs the detected bounding box, size, and inferred direction once
+     *   a second so you can compare against what you see and adjust with:
+     *     gmSetSignColor(rMin, rMax, gMin, gMax, bMin, bMax)
+     *     gmSetSignTriggerSize(fraction)   // 0–1, how close before turning
+     *   Call `gmCalibrateSign()` again to stop logging.
      *
      *   FALLBACK: if the canvas can't be read (e.g. it's tainted because
      *   game assets are cross-origin without CORS headers), pixel reading
@@ -554,31 +558,46 @@ object CppsLoginHandler {
     }
 
     /* ── Curve detection (canvas pixel analysis) ─────────────────────── */
-    /* Cart Surfer's track only bends where the game shows warning signs;
-       the visible track surface itself shifts left/right of canvas center
-       just before and during a curve. We snapshot the live-rendered
-       canvas onto an offscreen 2D canvas (drawImage works even when the
-       source is a WebGL/Ruffle canvas), then look at where the
-       track-colored pixels are concentrated in a horizontal band.        */
+    /* Cart Surfer's track shows a yellow/gold chevron warning sign on the
+       tunnel wall before every curve (several appear in sequence as you
+       approach). Calibrated directly from real gameplay screenshots:
+       sign fill color ≈ rgb(190,155,0), sign band sits roughly 25%-58%
+       down the canvas, and the chevron's shape narrows from a wide base
+       toward a point — the point is which way the curve bends.
+       No sign visible = straight track = no turn.                       */
 
-    /* Tunable via gmSetTrackColor(rMin,rMax,gMin,gMax,bMin,bMax).
-       Default is a rough guess for a sandy/wood mine-track color and
-       MUST be recalibrated against the real game — see gmCalibrateTrack(). */
-    window.__gm_track_color = window.__gm_track_color || {
-        rMin: 120, rMax: 215,
-        gMin: 70,  gMax: 160,
-        bMin: 20,  bMax: 100
+    /* Tunable via gmSetSignColor(rMin,rMax,gMin,gMax,bMin,bMax) if the
+       server uses a different art skin. Default values were sampled
+       directly from real screenshots of this game's Cart Surfer curve
+       sign vs. its straight-track frame (see gmCalibrateSign() to
+       re-sample against your own game if this ever stops matching). */
+    window.__gm_sign_color = window.__gm_sign_color || {
+        rMin: 140, rMax: 255,
+        gMin: 100, gMax: 200,
+        bMin: 0,   bMax: 45
     };
 
-    window.gmSetTrackColor = function(rMin, rMax, gMin, gMax, bMin, bMax) {
-        window.__gm_track_color = { rMin:rMin, rMax:rMax, gMin:gMin, gMax:gMax, bMin:bMin, bMax:bMax };
-        console.log('[GameMapper] track color range updated:', window.__gm_track_color);
+    window.gmSetSignColor = function(rMin, rMax, gMin, gMax, bMin, bMax) {
+        window.__gm_sign_color = { rMin:rMin, rMax:rMax, gMin:gMin, gMax:gMax, bMin:bMin, bMax:bMax };
+        console.log('[GameMapper] sign color range updated:', window.__gm_sign_color);
     };
 
-    /* Toggle a console logger that prints sampled RGB values from the
-       detection band once a second, so you can watch the real game and
-       correlate colors while tuning gmSetTrackColor(). Call again to stop. */
-    window.gmCalibrateTrack = function() {
+    /* How "big" (close) the sign must look before we actually press the
+       turn — 0 to 1, fraction of the sampled band height covered by the
+       tallest matching column. Raise this to turn later/closer to the
+       bend, lower it to turn earlier. Tune with gmSetSignTriggerSize(). */
+    window.__gm_sign_trigger_size = window.__gm_sign_trigger_size || 0.45;
+    window.gmSetSignTriggerSize = function(fraction) {
+        window.__gm_sign_trigger_size = fraction;
+        console.log('[GameMapper] sign trigger size set to', fraction);
+    };
+
+    /* Toggle a console logger that prints the sign-colored pixel bounding
+       box + peak column height once a second, so you can watch the real
+       game and see the numbers as signs approach/pass — useful for
+       tuning gmSetSignColor() and gmSetSignTriggerSize(). Call again to
+       stop. */
+    window.gmCalibrateSign = function() {
         if (window.__gm_calibrate_watcher) {
             clearInterval(window.__gm_calibrate_watcher);
             window.__gm_calibrate_watcher = null;
@@ -586,21 +605,12 @@ object CppsLoginHandler {
             return 'calibration off';
         }
         window.__gm_calibrate_watcher = setInterval(function() {
-            var sctx = getCanvasSnapshot();
-            if (!sctx) { console.log('[GameMapper] calibrate: canvas not ready'); return; }
-            var w = sctx.canvas.width, h = sctx.canvas.height;
-            var bandY = Math.floor(h * 0.40);
-            try {
-                var d = sctx.getImageData(0, bandY, w, 1).data;
-                var samples = [];
-                for (var x = 0; x < w; x += Math.floor(w / 8)) {
-                    var i = x * 4;
-                    samples.push('x=' + x + ' rgb(' + d[i] + ',' + d[i+1] + ',' + d[i+2] + ')');
-                }
-                console.log('[GameMapper] band y=' + bandY + ' -> ' + samples.join('  |  '));
-            } catch (e) {
-                console.warn('[GameMapper] calibrate: canvas read failed (tainted?)', e);
-            }
+            var r = scanSignBand();
+            if (!r) { console.log('[GameMapper] calibrate: canvas not ready / not readable'); return; }
+            console.log('[GameMapper] sign scan -> found=' + r.found
+                + ' bbox=[' + r.minX + ',' + r.maxX + ']'
+                + ' peakHeightFrac=' + r.peakFrac.toFixed(2)
+                + ' dir=' + r.dir);
         }, 1000);
         console.log('[GameMapper] calibration logging started — watch the console while playing');
         return 'calibration on';
@@ -620,40 +630,79 @@ object CppsLoginHandler {
         return sctx;
     }
 
-    /* Returns 'LEFT', 'RIGHT', or null (no curve detected right now). */
-    function detectCurveDirection() {
+    /* Scans a horizontal band of the canvas for sign-colored pixels and
+       returns { found, minX, maxX, peakFrac, dir } — dir is 'LEFT',
+       'RIGHT', or null if a sign is visible but not yet clearly one way
+       or the other (still too far / too faint to call). Returns null
+       only if the canvas itself couldn't be read at all.                */
+    function scanSignBand() {
         var sctx = getCanvasSnapshot();
         if (!sctx) return null;
         var w = sctx.canvas.width, h = sctx.canvas.height;
-        var bandY = Math.floor(h * 0.40);   /* horizon band — tune if needed */
-        var bandH = Math.max(4, Math.floor(h * 0.06));
+        var bandY0 = Math.floor(h * 0.25);
+        var bandY1 = Math.floor(h * 0.58);
+        var bandH  = bandY1 - bandY0;
         var data;
-        try { data = sctx.getImageData(0, bandY, w, bandH).data; }
+        try { data = sctx.getImageData(0, bandY0, w, bandH).data; }
         catch (e) { return null; }
 
-        var c = window.__gm_track_color;
-        var mid = w / 2;
-        var step = Math.max(1, Math.floor(w / 60));
-        var comX = 0, count = 0;
+        var c = window.__gm_sign_color;
+        var rows = 12;                                  /* sampled rows within the band */
+        var yStep = Math.max(1, Math.floor(bandH / rows));
+        var xStep = Math.max(1, Math.floor(w / 300));    /* ~300 sampled columns across width */
+        var bucketW = xStep;
+        var buckets = {};                                /* xBucket -> hit count across sampled rows */
 
-        for (var y = 0; y < bandH; y++) {
-            for (var x = 0; x < w; x += step) {
+        for (var y = 0; y < bandH; y += yStep) {
+            for (var x = 0; x < w; x += xStep) {
                 var i = (y * w + x) * 4;
                 var r = data[i], g = data[i+1], b = data[i+2];
-                if (r >= c.rMin && r <= c.rMax && g >= c.gMin && g <= c.gMax && b >= c.bMin && b <= c.bMax) {
-                    comX += x;
-                    count++;
+                var diff = r - g;
+                if (r >= c.rMin && r <= c.rMax && g >= c.gMin && g <= c.gMax &&
+                    b >= c.bMin && b <= c.bMax && diff > 10 && diff < 80) {
+                    var bx = Math.floor(x / bucketW);
+                    buckets[bx] = (buckets[bx] || 0) + 1;
                 }
             }
         }
-        if (count < 6) return null; /* not enough matching pixels — no signal */
 
-        comX /= count;
-        var offset = comX - mid;
-        var threshold = w * 0.12; /* how far off-center before we call it a curve */
-        if (offset > threshold) return 'RIGHT';
-        if (offset < -threshold) return 'LEFT';
-        return null;
+        var bucketKeys = Object.keys(buckets).map(Number).sort(function(a, b2) { return a - b2; });
+        if (!bucketKeys.length) return { found:false, minX:0, maxX:0, peakFrac:0, dir:null };
+
+        var minB = bucketKeys[0], maxB = bucketKeys[bucketKeys.length - 1];
+        var peak = 0;
+        for (var k = 0; k < bucketKeys.length; k++) {
+            if (buckets[bucketKeys[k]] > peak) peak = buckets[bucketKeys[k]];
+        }
+        var sampledRows = Math.ceil(bandH / yStep);
+        var peakFrac = peak / sampledRows;
+
+        /* Not enough of a cluster yet (noise / distant speck) to call it a sign. */
+        if ((maxB - minB) < 2 || peakFrac < 0.15) {
+            return { found:false, minX:minB * bucketW, maxX:maxB * bucketW, peakFrac:peakFrac, dir:null };
+        }
+
+        /* Chevron shape: wide base, narrowing to a point. Compare average
+           hit-count on the left third of the cluster vs the right third —
+           the point (tip) is the side with less coverage, and the curve
+           bends toward the tip. */
+        var span = maxB - minB + 1;
+        var thirdW = Math.max(1, Math.floor(span / 3));
+        var leftSum = 0, leftN = 0, rightSum = 0, rightN = 0;
+        for (var kk = 0; kk < bucketKeys.length; kk++) {
+            var bkx = bucketKeys[kk];
+            var v = buckets[bkx];
+            if (bkx <= minB + thirdW) { leftSum += v; leftN++; }
+            else if (bkx >= maxB - thirdW) { rightSum += v; rightN++; }
+        }
+        var leftAvg = leftN ? leftSum / leftN : 0;
+        var rightAvg = rightN ? rightSum / rightN : 0;
+
+        var dir = null;
+        if (leftAvg > rightAvg * 1.25) dir = 'RIGHT';       /* base on the left, tip on the right */
+        else if (rightAvg > leftAvg * 1.25) dir = 'LEFT';   /* base on the right, tip on the left */
+
+        return { found:true, minX:minB * bucketW, maxX:maxB * bucketW, peakFrac:peakFrac, dir:dir };
     }
 
     /* Probe once whether the canvas is readable at all. Cross-origin game
@@ -668,7 +717,7 @@ object CppsLoginHandler {
         try {
             if (sctx) sctx.getImageData(0, 0, 1, 1);
             curveDetectionEnabled = true;
-            console.log('[GameMapper] canvas readable — reactive curve detection ENABLED. Run gmCalibrateTrack() to tune colors.');
+            console.log('[GameMapper] canvas readable — reactive curve detection ENABLED. Run gmCalibrateSign() to watch it work / tune it.');
         } catch (e) {
             curveDetectionEnabled = false;
             console.warn('[GameMapper] canvas is tainted (cross-origin assets) — reactive curve detection DISABLED, using fixed-timer Turn fallback', e);
@@ -732,21 +781,38 @@ object CppsLoginHandler {
     document.body.appendChild(hud);
 
     /* ── Reactive curve watcher ────────────────────────────────────── */
-    /* Runs independently of the trick loop's timing so a turn fires the
-       instant a curve is actually seen on screen, not on a guessed clock. */
-    var lastTurnAt = 0;
-    var TURN_COOLDOWN_MS = 900; /* don't refire on the same curve */
+    /* Runs independently of the trick loop's timing so a turn fires when
+       a sign is actually seen close/large on screen, not on a guessed
+       clock. Several signs scroll by before the real curve (per your
+       screenshots), so this is edge-triggered on sign SIZE, not just
+       presence: it waits for the sign to grow past gmSetSignTriggerSize()
+       (close = about to reach the bend), fires once, then requires the
+       sign to disappear from view before it can fire again for the next
+       curve — instead of a blind timer that could fire on a distant,
+       still-approaching sign.                                           */
+    var signArmed = true;      /* true = ready to fire on the next big-enough sign */
+    var noSignStreak = 0;
 
     if (curveDetectionEnabled) {
         window.__gm_curve_watcher = setInterval(function() {
-            var dir = detectCurveDirection();
-            if (!dir) return;
-            var now = Date.now();
-            if (now - lastTurnAt < TURN_COOLDOWN_MS) return;
-            lastTurnAt = now;
-            pressKey(dir === 'LEFT' ? KEYS.LEFT : KEYS.RIGHT, null);
+            var r = scanSignBand();
+            if (!r) return; /* canvas hiccup this tick — just skip */
+
+            if (!r.found) {
+                noSignStreak++;
+                if (noSignStreak >= 3) signArmed = true; /* sign has cleared — ready for the next one */
+                return;
+            }
+            noSignStreak = 0;
+
+            if (!signArmed) return;                       /* already turned for this sign */
+            if (!r.dir) return;                            /* sign visible but shape unclear yet */
+            if (r.peakFrac < window.__gm_sign_trigger_size) return; /* still too small/far */
+
+            signArmed = false;
+            pressKey(r.dir === 'LEFT' ? KEYS.LEFT : KEYS.RIGHT, null);
             totalPts += 10;
-            hud.innerHTML = '\uD83E\uDD16 Turn ' + (dir === 'LEFT' ? '←' : '→')
+            hud.innerHTML = '\uD83E\uDD16 Turn ' + (r.dir === 'LEFT' ? '←' : '→')
                 + ' <span style="color:#aaffaa">+10pts</span>'
                 + '<br><small style="color:#bbb">total: ~' + totalPts + ' pts</small>';
         }, 90);
