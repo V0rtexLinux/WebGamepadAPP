@@ -22,6 +22,7 @@ import org.json.JSONArray
 import com.gamemapper.services.CppsLoginHandler
 import com.gamemapper.utils.Constants
 import com.gamemapper.utils.ProfileStorage
+import com.gamemapper.views.VirtualGamepadView
 
 /**
  * Full-screen WebView activity that:
@@ -56,6 +57,9 @@ class GameplayActivity : AppCompatActivity() {
 
     // Whether the mapping overlay is currently visible
     private var overlayVisible = false
+
+    // Whether the virtual on-screen gamepad is visible
+    private var gamepadVisible = true
 
     // Whether the virtual cursor has been injected
     private var cursorInjected = false
@@ -303,14 +307,58 @@ class GameplayActivity : AppCompatActivity() {
     private fun setupUI() {
         binding.btnBack.setOnClickListener { confirmExit() }
         binding.btnToggleOverlay.setOnClickListener { toggleOverlay() }
-        binding.btnCursorToggle.setOnClickListener {
-            binding.webView.evaluateJavascript("if(window.gmToggleCursor) gmToggleCursor(${!cursorInjected});", null)
-            Toast.makeText(this, if (cursorInjected) "Cursor ocultado" else "Cursor visível", Toast.LENGTH_SHORT).show()
-        }
+        binding.btnToggleGamepad.setOnClickListener { toggleVirtualGamepad() }
+
+        wireVirtualGamepad()
 
         // Build overlay content from profile
         buildOverlayContent()
         binding.overlayCard.visibility = View.GONE
+    }
+
+    private fun toggleVirtualGamepad() {
+        gamepadVisible = !gamepadVisible
+        binding.virtualGamepad.visibility = if (gamepadVisible) View.VISIBLE else View.GONE
+    }
+
+    private fun wireVirtualGamepad() {
+        binding.virtualGamepad.listener = object : VirtualGamepadView.GamepadListener {
+
+            override fun onStickMove(dx: Float, dy: Float) {
+                // VirtualGamepadView already multiplied by movementSpeed — call JS directly
+                // to avoid double-scaling (do NOT route through moveCursor()).
+                moveCursorDirect(dx, dy)
+            }
+
+            override fun onStickRelease() {
+                // Cursor movement stops naturally; nothing to do.
+            }
+
+            override fun onButtonDown(button: VirtualGamepadView.Btn) {
+                when (button) {
+                    VirtualGamepadView.Btn.A     -> triggerCursorClick()
+                    VirtualGamepadView.Btn.B     -> injectKeyEvent(27, "keydown")   // Esc
+                    VirtualGamepadView.Btn.X     -> injectKeyEvent(69, "keydown")   // E – interact
+                    VirtualGamepadView.Btn.Y     -> toggleOverlay()
+                    VirtualGamepadView.Btn.L1    -> injectKeyEvent(84, "keydown")   // T – chat
+                    VirtualGamepadView.Btn.R1    -> injectKeyEvent(77, "keydown")   // M – map
+                    VirtualGamepadView.Btn.L2    -> injectKeyEvent(73, "keydown")   // I – inventory
+                    VirtualGamepadView.Btn.START -> injectKeyEvent(13, "keydown")   // Enter
+                }
+            }
+
+            override fun onButtonUp(button: VirtualGamepadView.Btn) {
+                when (button) {
+                    VirtualGamepadView.Btn.B     -> injectKeyEvent(27, "keyup")
+                    VirtualGamepadView.Btn.X     -> injectKeyEvent(69, "keyup")
+                    VirtualGamepadView.Btn.L1    -> injectKeyEvent(84, "keyup")
+                    VirtualGamepadView.Btn.R1    -> injectKeyEvent(77, "keyup")
+                    VirtualGamepadView.Btn.L2    -> injectKeyEvent(73, "keyup")
+                    VirtualGamepadView.Btn.START -> injectKeyEvent(13, "keyup")
+                    else -> { /* A and Y have no keyup action */ }
+                }
+            }
+        }
     }
 
     private fun buildOverlayContent() {
