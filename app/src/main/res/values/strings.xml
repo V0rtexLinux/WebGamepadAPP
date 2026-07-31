@@ -33,4 +33,15 @@
     <string name="error_no_url">Digite a URL do jogo</string>
     <string name="error_not_cpps">Este app suporta apenas servidores CPPS de Club Penguin.</string>
     <string name="error_recovery_title">⚠️ Falha na Recuperação</string>
+
+    <!-- Main/Splash -->
+    <string name="tagline">Seu gamepad, sem fio</string>
+    <string name="enter_url">Digite a URL do jogo</string>
+
+    <!-- Control map -->
+    <string name="cancel">Cancelar</string>
+    <string name="play">Jogar</string>
+    <string name="remap">Remapear</string>
+    <string name="cycle_layout">Alternar layout</string>
+    <string name="share">Compartilhar</string>
 </resources>
