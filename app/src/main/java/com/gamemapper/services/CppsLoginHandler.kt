@@ -446,9 +446,36 @@ object CppsLoginHandler {
      *  • First call  → starts the loop, returns "started"
      *  • Second call → stops  the loop, returns "stopped"
      *
-     * Trick rotation (max coins per cycle):
-     *   Flip (100) → Turn (10) → Run on Tracks (80) → Turn (10)
-     *   → Flip (100) → Turn (10) → Handstand (80) → Turn (10)   = 390 pts / 8 keys
+     * v2 — REACTIVE CURVES:
+     *   Cart Surfer's track only turns where a warning sign appears (the game
+     *   always shows 4 signs before a curve; missing the turn = crash). The
+     *   old version blindly pressed a Turn key on a fixed timer, which is
+     *   guesswork and eventually drifts out of sync and crashes the cart.
+     *
+     *   This version samples the Ruffle/Phaser canvas pixels each tick,
+     *   estimates whether the track bends left or right by looking at where
+     *   the track-colored pixels are concentrated relative to the canvas
+     *   center, and presses LEFT/RIGHT only when a curve is actually
+     *   detected — decoupled from the scoring-trick timer.
+     *
+     *   CALIBRATION REQUIRED: the default color range below is a guess and
+     *   must be tuned against the real game. While Cart Surfer is running,
+     *   call `gmCalibrateTrack()` in the devtools console — it logs sampled
+     *   RGB values from the detection band every second so you can find the
+     *   real track color, then lock it in with:
+     *     gmSetTrackColor(rMin, rMax, gMin, gMax, bMin, bMax)
+     *   Call `gmCalibrateTrack()` again to stop logging.
+     *
+     *   FALLBACK: if the canvas can't be read (e.g. it's tainted because
+     *   game assets are cross-origin without CORS headers), pixel reading
+     *   throws a SecurityError. This is detected once at startup and the
+     *   script automatically falls back to the old fixed-timer Turn
+     *   behaviour so the farm still runs, just without reactive curves.
+     *
+     * Non-turn trick rotation (max coins per cycle):
+     *   Flip (100) → Run on Tracks (80) → Flip (100) → Handstand (80)
+     *   → Flip (100) → Spin (80)                          = 540 pts / cycle
+     *   (Turns are now event-driven, not part of the fixed rotation.)
      *
      * Requires VIRTUAL_CURSOR_JS (window.gmKey) to be injected first.
      *
@@ -461,6 +488,11 @@ object CppsLoginHandler {
     if (window.__gm_farm_interval) {
         clearInterval(window.__gm_farm_interval);
         window.__gm_farm_interval = null;
+        if (window.__gm_curve_watcher) {
+            clearInterval(window.__gm_curve_watcher);
+            window.__gm_curve_watcher = null;
+        }
+        window.__gm_calibrate_watcher && clearInterval(window.__gm_calibrate_watcher);
         var old = document.getElementById('__gm_farm_hud');
         if (old) old.remove();
         return 'stopped';
@@ -521,25 +553,157 @@ object CppsLoginHandler {
         }, 130);
     }
 
+    /* ── Curve detection (canvas pixel analysis) ─────────────────────── */
+    /* Cart Surfer's track only bends where the game shows warning signs;
+       the visible track surface itself shifts left/right of canvas center
+       just before and during a curve. We snapshot the live-rendered
+       canvas onto an offscreen 2D canvas (drawImage works even when the
+       source is a WebGL/Ruffle canvas), then look at where the
+       track-colored pixels are concentrated in a horizontal band.        */
+
+    /* Tunable via gmSetTrackColor(rMin,rMax,gMin,gMax,bMin,bMax).
+       Default is a rough guess for a sandy/wood mine-track color and
+       MUST be recalibrated against the real game — see gmCalibrateTrack(). */
+    window.__gm_track_color = window.__gm_track_color || {
+        rMin: 120, rMax: 215,
+        gMin: 70,  gMax: 160,
+        bMin: 20,  bMax: 100
+    };
+
+    window.gmSetTrackColor = function(rMin, rMax, gMin, gMax, bMin, bMax) {
+        window.__gm_track_color = { rMin:rMin, rMax:rMax, gMin:gMin, gMax:gMax, bMin:bMin, bMax:bMax };
+        console.log('[GameMapper] track color range updated:', window.__gm_track_color);
+    };
+
+    /* Toggle a console logger that prints sampled RGB values from the
+       detection band once a second, so you can watch the real game and
+       correlate colors while tuning gmSetTrackColor(). Call again to stop. */
+    window.gmCalibrateTrack = function() {
+        if (window.__gm_calibrate_watcher) {
+            clearInterval(window.__gm_calibrate_watcher);
+            window.__gm_calibrate_watcher = null;
+            console.log('[GameMapper] calibration logging stopped');
+            return 'calibration off';
+        }
+        window.__gm_calibrate_watcher = setInterval(function() {
+            var sctx = getCanvasSnapshot();
+            if (!sctx) { console.log('[GameMapper] calibrate: canvas not ready'); return; }
+            var w = sctx.canvas.width, h = sctx.canvas.height;
+            var bandY = Math.floor(h * 0.40);
+            try {
+                var d = sctx.getImageData(0, bandY, w, 1).data;
+                var samples = [];
+                for (var x = 0; x < w; x += Math.floor(w / 8)) {
+                    var i = x * 4;
+                    samples.push('x=' + x + ' rgb(' + d[i] + ',' + d[i+1] + ',' + d[i+2] + ')');
+                }
+                console.log('[GameMapper] band y=' + bandY + ' -> ' + samples.join('  |  '));
+            } catch (e) {
+                console.warn('[GameMapper] calibrate: canvas read failed (tainted?)', e);
+            }
+        }, 1000);
+        console.log('[GameMapper] calibration logging started — watch the console while playing');
+        return 'calibration on';
+    };
+
+    /* Draw whatever canvas the game is using onto a hidden 2D canvas so we
+       can read pixels back out. Returns a 2D context, or null if there is
+       no usable canvas yet. */
+    function getCanvasSnapshot() {
+        var source = getTarget();
+        if (!source || source.tagName !== 'CANVAS' || !source.width || !source.height) return null;
+        var snap = window.__gm_snap_canvas || (window.__gm_snap_canvas = document.createElement('canvas'));
+        snap.width = source.width;
+        snap.height = source.height;
+        var sctx = snap.getContext('2d', { willReadFrequently: true });
+        sctx.drawImage(source, 0, 0);
+        return sctx;
+    }
+
+    /* Returns 'LEFT', 'RIGHT', or null (no curve detected right now). */
+    function detectCurveDirection() {
+        var sctx = getCanvasSnapshot();
+        if (!sctx) return null;
+        var w = sctx.canvas.width, h = sctx.canvas.height;
+        var bandY = Math.floor(h * 0.40);   /* horizon band — tune if needed */
+        var bandH = Math.max(4, Math.floor(h * 0.06));
+        var data;
+        try { data = sctx.getImageData(0, bandY, w, bandH).data; }
+        catch (e) { return null; }
+
+        var c = window.__gm_track_color;
+        var mid = w / 2;
+        var step = Math.max(1, Math.floor(w / 60));
+        var comX = 0, count = 0;
+
+        for (var y = 0; y < bandH; y++) {
+            for (var x = 0; x < w; x += step) {
+                var i = (y * w + x) * 4;
+                var r = data[i], g = data[i+1], b = data[i+2];
+                if (r >= c.rMin && r <= c.rMax && g >= c.gMin && g <= c.gMax && b >= c.bMin && b <= c.bMax) {
+                    comX += x;
+                    count++;
+                }
+            }
+        }
+        if (count < 6) return null; /* not enough matching pixels — no signal */
+
+        comX /= count;
+        var offset = comX - mid;
+        var threshold = w * 0.12; /* how far off-center before we call it a curve */
+        if (offset > threshold) return 'RIGHT';
+        if (offset < -threshold) return 'LEFT';
+        return null;
+    }
+
+    /* Probe once whether the canvas is readable at all. Cross-origin game
+       assets without CORS headers taint the canvas and getImageData()
+       throws — in that case we can't do reactive detection and fall back
+       to the old fixed-timer Turn behaviour instead of silently doing
+       nothing. */
+    var curveDetectionEnabled = false;
+    (function probeCanvasReadability() {
+        var sctx = getCanvasSnapshot();
+        if (!sctx) { console.warn('[GameMapper] canvas not ready yet — will retry curve detection shortly'); }
+        try {
+            if (sctx) sctx.getImageData(0, 0, 1, 1);
+            curveDetectionEnabled = true;
+            console.log('[GameMapper] canvas readable — reactive curve detection ENABLED. Run gmCalibrateTrack() to tune colors.');
+        } catch (e) {
+            curveDetectionEnabled = false;
+            console.warn('[GameMapper] canvas is tainted (cross-origin assets) — reactive curve detection DISABLED, using fixed-timer Turn fallback', e);
+        }
+    })();
+
     /* ── Trick table ────────────────────────────────────────────────── */
     /* Points from the image. Rules:
        • Never repeat the same trick twice in a row (game penalty).
-       • Turn (→ / ←) used as separator; gives 10 pts each.
        • k2 pressed 270 ms after k1 — Ruffle needs the gap to see them
-         as a two-key combo, not two independent single-key events.     */
-    var tricks = [
+         as a two-key combo, not two independent single-key events.
+       When curve detection is enabled, Turn is handled reactively by the
+       curve watcher below and dropped from this fixed rotation so we
+       don't double-turn. If detection is disabled (fallback mode), Turn
+       stays in the rotation like the old blind version.                  */
+    var tricks = curveDetectionEnabled ? [
         { k1:KEYS.DOWN,  k2:KEYS.SPACE, label:'Flip',          pts:100 },  // ↓ Space
-        { k1:KEYS.RIGHT, k2:null,        label:'Turn →',   pts:10  },  // →
+        { k1:KEYS.DOWN,  k2:KEYS.DOWN,  label:'Run on Tracks', pts:80  },  // ↓ ↓
+        { k1:KEYS.DOWN,  k2:KEYS.SPACE, label:'Flip',          pts:100 },  // ↓ Space
+        { k1:KEYS.UP,    k2:KEYS.UP,    label:'Handstand',     pts:80  },  // ↑ ↑
+        { k1:KEYS.DOWN,  k2:KEYS.SPACE, label:'Flip',          pts:100 },  // ↓ Space
+        { k1:KEYS.SPACE, k2:KEYS.RIGHT, label:'Spin →',        pts:80  },  // Space →
+    ] : [
+        { k1:KEYS.DOWN,  k2:KEYS.SPACE, label:'Flip',          pts:100 },  // ↓ Space
+        { k1:KEYS.RIGHT, k2:null,        label:'Turn →',       pts:10  },  // →
         { k1:KEYS.DOWN,  k2:KEYS.DOWN,  label:'Run on Tracks',  pts:80  },  // ↓ ↓
-        { k1:KEYS.LEFT,  k2:null,        label:'Turn ←',   pts:10  },  // ←
+        { k1:KEYS.LEFT,  k2:null,        label:'Turn ←',       pts:10  },  // ←
         { k1:KEYS.DOWN,  k2:KEYS.SPACE, label:'Flip',           pts:100 },  // ↓ Space
-        { k1:KEYS.RIGHT, k2:null,        label:'Turn →',   pts:10  },  // →
+        { k1:KEYS.RIGHT, k2:null,        label:'Turn →',       pts:10  },  // →
         { k1:KEYS.UP,    k2:KEYS.UP,    label:'Handstand',      pts:80  },  // ↑ ↑
-        { k1:KEYS.LEFT,  k2:null,        label:'Turn ←',   pts:10  },  // ←
+        { k1:KEYS.LEFT,  k2:null,        label:'Turn ←',       pts:10  },  // ←
         { k1:KEYS.DOWN,  k2:KEYS.SPACE, label:'Flip',           pts:100 },  // ↓ Space
-        { k1:KEYS.RIGHT, k2:null,        label:'Turn →',   pts:10  },  // →
+        { k1:KEYS.RIGHT, k2:null,        label:'Turn →',       pts:10  },  // →
         { k1:KEYS.SPACE, k2:KEYS.RIGHT, label:'Spin →',    pts:80  },  // Space →
-        { k1:KEYS.LEFT,  k2:null,        label:'Turn ←',   pts:10  },  // ←
+        { k1:KEYS.LEFT,  k2:null,        label:'Turn ←',       pts:10  },  // ←
     ];
 
     var step     = 0;
@@ -564,10 +728,31 @@ object CppsLoginHandler {
         'text-align:center',
         'white-space:nowrap'
     ].join(';');
-    hud.innerHTML = '\uD83E\uDD16 AFK Farm ON';
+    hud.innerHTML = '\uD83E\uDD16 AFK Farm ON' + (curveDetectionEnabled ? ' <small style="color:#8fd">(curvas: reativo)</small>' : ' <small style="color:#f88">(curvas: timer fixo)</small>');
     document.body.appendChild(hud);
 
-    /* ── Main loop ──────────────────────────────────────────────────── */
+    /* ── Reactive curve watcher ────────────────────────────────────── */
+    /* Runs independently of the trick loop's timing so a turn fires the
+       instant a curve is actually seen on screen, not on a guessed clock. */
+    var lastTurnAt = 0;
+    var TURN_COOLDOWN_MS = 900; /* don't refire on the same curve */
+
+    if (curveDetectionEnabled) {
+        window.__gm_curve_watcher = setInterval(function() {
+            var dir = detectCurveDirection();
+            if (!dir) return;
+            var now = Date.now();
+            if (now - lastTurnAt < TURN_COOLDOWN_MS) return;
+            lastTurnAt = now;
+            pressKey(dir === 'LEFT' ? KEYS.LEFT : KEYS.RIGHT, null);
+            totalPts += 10;
+            hud.innerHTML = '\uD83E\uDD16 Turn ' + (dir === 'LEFT' ? '←' : '→')
+                + ' <span style="color:#aaffaa">+10pts</span>'
+                + '<br><small style="color:#bbb">total: ~' + totalPts + ' pts</small>';
+        }, 90);
+    }
+
+    /* ── Main trick loop ───────────────────────────────────────────── */
     window.__gm_farm_interval = setInterval(function() {
         var t = tricks[step % tricks.length];
         step++;
