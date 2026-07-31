@@ -1,0 +1,252 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/background">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <!-- Live gamepad preview -->
+        <androidx.cardview.widget.CardView
+            xmlns:app="http://schemas.android.com/apk/res-auto"
+            android:layout_width="match_parent"
+            android:layout_height="200dp"
+            android:layout_marginBottom="16dp"
+            app:cardBackgroundColor="#FF0D1020"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="6dp">
+
+            <com.gamemapper.views.VirtualGamepadView
+                android:id="@+id/previewGamepad"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+        </androidx.cardview.widget.CardView>
+
+        <!-- Theme Selection -->
+        <androidx.cardview.widget.CardView
+            xmlns:app="http://schemas.android.com/apk/res-auto"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            app:cardBackgroundColor="@color/surface"
+            app:cardCornerRadius="10dp"
+            app:cardElevation="3dp">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="🎨 Tema do Gamepad" android:textColor="@color/on_primary"
+                    android:textSize="15sp" android:textStyle="bold" android:layout_marginBottom="8dp"/>
+                <Spinner android:id="@+id/spinnerTheme"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:background="@color/surface_variant" android:padding="8dp"/>
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
+        <!-- Sensitivity -->
+        <androidx.cardview.widget.CardView
+            xmlns:app="http://schemas.android.com/apk/res-auto"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            app:cardBackgroundColor="@color/surface"
+            app:cardCornerRadius="10dp"
+            app:cardElevation="3dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical" android:padding="16dp">
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="horizontal" android:layout_marginBottom="8dp">
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content"
+                        android:layout_weight="1" android:text="🎯 Sensibilidade do Stick"
+                        android:textColor="@color/on_primary" android:textSize="14sp" android:textStyle="bold"/>
+                    <TextView android:id="@+id/tvSensitivityValue" android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" android:textColor="@color/accent"
+                        android:textSize="14sp" android:text="1.0x"/>
+                </LinearLayout>
+                <SeekBar android:id="@+id/seekSensitivity" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:progressTint="@color/accent"/>
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
+        <!-- Deadzone -->
+        <androidx.cardview.widget.CardView
+            xmlns:app="http://schemas.android.com/apk/res-auto"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            app:cardBackgroundColor="@color/surface"
+            app:cardCornerRadius="10dp"
+            app:cardElevation="3dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical" android:padding="16dp">
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="horizontal" android:layout_marginBottom="8dp">
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content"
+                        android:layout_weight="1" android:text="⭕ Zona Morta (Deadzone)"
+                        android:textColor="@color/on_primary" android:textSize="14sp" android:textStyle="bold"/>
+                    <TextView android:id="@+id/tvDeadzoneValue" android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" android:textColor="@color/accent"
+                        android:textSize="14sp" android:text="12%"/>
+                </LinearLayout>
+                <SeekBar android:id="@+id/seekDeadzone" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:progressTint="@color/accent"/>
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
+        <!-- Movement Speed -->
+        <androidx.cardview.widget.CardView
+            xmlns:app="http://schemas.android.com/apk/res-auto"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            app:cardBackgroundColor="@color/surface"
+            app:cardCornerRadius="10dp"
+            app:cardElevation="3dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical" android:padding="16dp">
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="horizontal" android:layout_marginBottom="8dp">
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content"
+                        android:layout_weight="1" android:text="🏃 Velocidade de Movimento"
+                        android:textColor="@color/on_primary" android:textSize="14sp" android:textStyle="bold"/>
+                    <TextView android:id="@+id/tvMovementSpeedValue" android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" android:textColor="@color/accent"
+                        android:textSize="14sp" android:text="38"/>
+                </LinearLayout>
+                <SeekBar android:id="@+id/seekMovementSpeed" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:progressTint="@color/accent"/>
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
+        <!-- Opacity -->
+        <androidx.cardview.widget.CardView
+            xmlns:app="http://schemas.android.com/apk/res-auto"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            app:cardBackgroundColor="@color/surface"
+            app:cardCornerRadius="10dp"
+            app:cardElevation="3dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical" android:padding="16dp">
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="horizontal" android:layout_marginBottom="8dp">
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content"
+                        android:layout_weight="1" android:text="💧 Opacidade"
+                        android:textColor="@color/on_primary" android:textSize="14sp" android:textStyle="bold"/>
+                    <TextView android:id="@+id/tvOpacityValue" android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" android:textColor="@color/accent"
+                        android:textSize="14sp" android:text="85%"/>
+                </LinearLayout>
+                <SeekBar android:id="@+id/seekOpacity" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:progressTint="@color/accent"/>
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
+        <!-- Haptic Feedback -->
+        <androidx.cardview.widget.CardView
+            xmlns:app="http://schemas.android.com/apk/res-auto"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            app:cardBackgroundColor="@color/surface"
+            app:cardCornerRadius="10dp"
+            app:cardElevation="3dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical" android:padding="16dp">
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="horizontal" android:gravity="center_vertical"
+                    android:layout_marginBottom="12dp">
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content"
+                        android:layout_weight="1" android:text="📳 Vibração (Haptic)"
+                        android:textColor="@color/on_primary" android:textSize="14sp" android:textStyle="bold"/>
+                    <Switch android:id="@+id/switchHaptic" android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" android:checked="true"/>
+                </LinearLayout>
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="horizontal" android:layout_marginBottom="8dp">
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content"
+                        android:layout_weight="1" android:text="Intensidade"
+                        android:textColor="@color/on_surface_medium" android:textSize="13sp"/>
+                    <TextView android:id="@+id/tvHapticStrengthValue" android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" android:textColor="@color/accent"
+                        android:textSize="13sp" android:text="50%"/>
+                </LinearLayout>
+                <SeekBar android:id="@+id/seekHapticStrength" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:progressTint="@color/accent"/>
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
+        <!-- Auto-hide & Velocity -->
+        <androidx.cardview.widget.CardView
+            xmlns:app="http://schemas.android.com/apk/res-auto"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            app:cardBackgroundColor="@color/surface"
+            app:cardCornerRadius="10dp"
+            app:cardElevation="3dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical" android:padding="16dp">
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="horizontal" android:gravity="center_vertical"
+                    android:layout_marginBottom="12dp">
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content"
+                        android:layout_weight="1" android:text="👁 Auto-ocultar gamepad"
+                        android:textColor="@color/on_primary" android:textSize="14sp" android:textStyle="bold"/>
+                    <Switch android:id="@+id/switchAutoHide" android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"/>
+                </LinearLayout>
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="horizontal" android:gravity="center_vertical">
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content"
+                        android:layout_weight="1" android:text="⚡ Rastreamento de Velocidade"
+                        android:textColor="@color/on_primary" android:textSize="14sp" android:textStyle="bold"/>
+                    <Switch android:id="@+id/switchVelocity" android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" android:checked="true"/>
+                </LinearLayout>
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
+        <!-- Buttons -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="24dp">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnResetDefaults"
+                android:layout_width="0dp"
+                android:layout_height="52dp"
+                android:layout_weight="1"
+                android:layout_marginEnd="8dp"
+                android:text="Restaurar"
+                android:textSize="14sp"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                xmlns:app="http://schemas.android.com/apk/res-auto"
+                app:strokeColor="@color/accent"
+                app:cornerRadius="10dp"/>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnSaveSettings"
+                android:layout_width="0dp"
+                android:layout_height="52dp"
+                android:layout_weight="1"
+                android:text="✅ Salvar"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                xmlns:app="http://schemas.android.com/apk/res-auto"
+                app:backgroundTint="@color/accent"
+                app:cornerRadius="10dp"/>
+        </LinearLayout>
+
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

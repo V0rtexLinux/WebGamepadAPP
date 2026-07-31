@@ -1,25 +1,36 @@
-<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">GameMapper</string>
-    <string name="tagline">Mapeamento automático de controles</string>
-    <string name="enter_url">URL do jogo (ex: cpjourney.com)</string>
+    <string name="app_name">WebGamepad</string>
     <string name="analyze">Analisar Jogo</string>
-    <string name="my_profiles">Meus Perfis</string>
-    <string name="analyzing">Analisando…</string>
-    <string name="controls_mapped">controles mapeados</string>
-    <string name="remap">🔄 Remapear</string>
-    <string name="cycle_layout">⊞ Mudar Layout</string>
-    <string name="share">⬆ Compartilhar</string>
-    <string name="no_profiles">Nenhum perfil ainda.\nAnalise um jogo para começar!</string>
-    <string name="btn_cpjourney">CPJourney</string>
-    <string name="btn_clubpenguin">Club Penguin</string>
-    <string name="cancel">Cancelar</string>
-    <string name="delete">Excluir</string>
-    <string name="open">Abrir</string>
-    <string name="play">▶ Jogar</string>
-    <string name="gameplay_back">Sair do jogo</string>
-    <string name="login_detected">Login detectado</string>
-    <string name="btn_cpps_app">CPPS.app</string>
-    <string name="btn_icer">Icer</string>
-    <string name="btn_cpl">CP Legacy</string>
+    <string name="url_hint">URL do jogo (ex: play.cpjourney.net)</string>
+    <string name="no_profiles">Nenhum perfil criado ainda</string>
+    <string name="delete_profile">Excluir perfil</string>
+    <string name="open_game">Abrir jogo</string>
+    <string name="profiles_title">Perfis Salvos</string>
+
+    <!-- Farm strings -->
+    <string name="farm_title">Auto-Farm de Coins</string>
+    <string name="farm_cart_surfer">🛒 Cart Surfer (60k/h)</string>
+    <string name="farm_mining">⛏️ Mineração</string>
+    <string name="farm_fishing">🎣 Pesca</string>
+    <string name="farm_puffle">🐧 Puffle Roundup</string>
+    <string name="farm_pizza">👨‍🍳 Pizza Job</string>
+    <string name="farm_stop">⏹ Parar Farm</string>
+    <string name="farm_auto">🌾 Auto-Detectar</string>
+    <string name="farm_dashboard">📊 Dashboard</string>
+
+    <!-- Gamepad settings -->
+    <string name="settings_title">Configurações do Gamepad</string>
+    <string name="settings_theme">Tema</string>
+    <string name="settings_sensitivity">Sensibilidade</string>
+    <string name="settings_deadzone">Zona Morta</string>
+    <string name="settings_speed">Velocidade</string>
+    <string name="settings_opacity">Opacidade</string>
+    <string name="settings_haptic">Vibração</string>
+    <string name="settings_save">Salvar Configurações</string>
+    <string name="settings_reset">Restaurar Padrões</string>
+
+    <!-- Error messages -->
+    <string name="error_no_url">Digite a URL do jogo</string>
+    <string name="error_not_cpps">Este app suporta apenas servidores CPPS de Club Penguin.</string>
+    <string name="error_recovery_title">⚠️ Falha na Recuperação</string>
 </resources>

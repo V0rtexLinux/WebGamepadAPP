@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/background"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <!-- Header -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="📊 Estatísticas de Farm"
+            android:textColor="@color/on_primary"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="16dp" />
+
+        <!-- Stats card -->
+        <androidx.cardview.widget.CardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            app:cardBackgroundColor="@color/surface"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="4dp"
+            xmlns:app="http://schemas.android.com/apk/res-auto">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <GridLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:columnCount="2"
+                    android:rowCount="4"
+                    android:useDefaultMargins="true">
+
+                    <TextView android:id="@+id/tvTotalCoins"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_columnWeight="1"
+                        android:textColor="@color/on_primary"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:padding="8dp"
+                        android:text="🪙 0" />
+
+                    <TextView android:id="@+id/tvTotalSessions"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_columnWeight="1"
+                        android:textColor="@color/on_surface_medium"
+                        android:textSize="14sp"
+                        android:padding="8dp"
+                        android:text="🎮 0 sessões" />
+
+                    <TextView android:id="@+id/tvTotalTime"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_columnWeight="1"
+                        android:textColor="@color/on_surface_medium"
+                        android:textSize="14sp"
+                        android:padding="8dp"
+                        android:text="⏱ 0m" />
+
+                    <TextView android:id="@+id/tvCoinsPerHour"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_columnWeight="1"
+                        android:textColor="@color/accent"
+                        android:textSize="14sp"
+                        android:textStyle="bold"
+                        android:padding="8dp"
+                        android:text="📈 0/h" />
+
+                    <TextView android:id="@+id/tvBestSession"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_columnWeight="1"
+                        android:textColor="@color/on_surface_medium"
+                        android:textSize="14sp"
+                        android:padding="8dp"
+                        android:text="🏆 0" />
+
+                    <TextView android:id="@+id/tvTotalRounds"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_columnWeight="1"
+                        android:textColor="@color/on_surface_medium"
+                        android:textSize="14sp"
+                        android:padding="8dp"
+                        android:text="🔄 0 rodadas" />
+
+                    <TextView android:id="@+id/tvBestMinigame"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_columnWeight="1"
+                        android:textColor="@color/on_surface_medium"
+                        android:textSize="14sp"
+                        android:padding="8dp"
+                        android:text="⭐ —" />
+
+                    <TextView android:id="@+id/tvErrorsFixed"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_columnWeight="1"
+                        android:textColor="@color/on_surface_medium"
+                        android:textSize="14sp"
+                        android:padding="8dp"
+                        android:text="🔧 0 erros" />
+
+                </GridLayout>
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
+        <!-- History section -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Histórico de Sessões"
+            android:textColor="@color/on_surface_medium"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.05"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:id="@+id/tvHistoryEmpty"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Nenhuma sessão de farm ainda.\nInicie um farm no gameplay!"
+            android:textColor="@color/on_surface_low"
+            android:textSize="14sp"
+            android:gravity="center"
+            android:padding="32dp"
+            android:visibility="gone" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rvHistory"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:nestedScrollingEnabled="false" />
+
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

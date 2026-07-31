@@ -14,80 +14,64 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.gamemapper.R
 import com.gamemapper.databinding.ActivityGameplayBinding
-import com.gamemapper.models.ControlCategory
-import com.gamemapper.models.ControlModel
-import com.gamemapper.models.ControlProfile
-import com.gamemapper.models.ControlType
-import org.json.JSONArray
-import com.gamemapper.services.CppsLoginHandler
-import com.gamemapper.utils.Constants
-import com.gamemapper.utils.CredentialStorage
-import com.gamemapper.utils.ProfileStorage
+import com.gamemapper.models.*
+import com.gamemapper.services.*
+import com.gamemapper.utils.*
 import com.gamemapper.views.VirtualGamepadView
+import org.json.JSONArray
 
 /**
- * Full-screen WebView activity that:
- *  1. Loads the game URL (full-screen, visible WebView)
- *  2. Detects CPPS login pages and offers credential injection (HTML-form servers)
- *  3. Injects a virtual cursor for click-to-move Club Penguin games
- *  4. Translates Android gamepad button events → JS keyboard / mouse events in the game
- *  5. Shows a toggleable mapping overlay (Y / Options / Start)
- *
- * Gamepad button → game action mapping:
- *  D-pad / Left stick   → move virtual cursor (for CP click-to-move)
- *  A (96)               → click at cursor position (move penguin)
- *  B (97)               → mapped ACTION control #2 (or Esc)
- *  X (99)               → mapped INTERACTION control (or E key)
- *  Y (100)              → toggle mapping overlay
- *  L1 (102)             → mapped UI control #1
- *  R1 (103)             → mapped UI control #2
- *  Start (108)          → Enter / open map (M)
- *  Select (109)         → T key (open chat in CP)
- *  Left stick btn (106) → same as A (click)
+ * v2.0 — Full-screen gameplay activity.
+ * New in v2:
+ *  • CoinFarmManager — auto-detects minigames and runs farm scripts
+ *  • ErrorRecoveryManager — auto-recovers from JS/page errors
+ *  • Enhanced VirtualGamepadView — neon/glass themes, haptics, spring-back
+ *  • Farm status overlay (FarmStatusView)
+ *  • Gamepad settings shortcut
+ *  • Per-session stats tracking
  */
-class GameplayActivity : AppCompatActivity() {
+@SuppressLint("SetJavaScriptEnabled")
+class GameplayActivity : AppCompatActivity(),
+    VirtualGamepadView.GamepadListener,
+    CoinFarmManager.FarmListener,
+    ErrorRecoveryManager.RecoveryListener {
 
     private lateinit var binding: ActivityGameplayBinding
     private var gameUrl: String = ""
     private var profileId: String = ""
     private val handler = Handler(Looper.getMainLooper())
 
-    // Virtual cursor step size in pixels per gamepad event
     private val CURSOR_STEP = 22f
     private val CURSOR_FAST_STEP = 55f
 
-    // Whether the mapping overlay is currently visible
     private var overlayVisible = false
-
-    // Whether the virtual on-screen gamepad is visible
     private var gamepadVisible = true
-
-    // Whether the virtual cursor has been injected
     private var cursorInjected = false
-
-    // Whether we already offered login credentials
     private var loginOffered = false
 
-    // Detected CPPS info
     private var cppsInfo: CppsLoginHandler.CppsInfo? = null
-
-    // Controls from profile, sorted by priority for gamepad assignment
     private var movementControls = listOf<ControlModel>()
     private var actionControls   = listOf<ControlModel>()
     private var uiControls       = listOf<ControlModel>()
-
-    // Canvas-quadrant specific controls (set when profile.isCanvasMode == true)
     private var dpadQuadrant:   ControlModel? = null
     private var actionQuadrant: ControlModel? = null
     private var uiQuadrant:     ControlModel? = null
     private var clickQuadrant:  ControlModel? = null
     private var isCanvasMode = false
 
-    @SuppressLint("SetJavaScriptEnabled")
+    // ── v2: Farm & Error managers ──────────────────────────────────────────────
+    private lateinit var farmManager: CoinFarmManager
+    private lateinit var errorRecovery: ErrorRecoveryManager
+    private var autoFarmEnabled = false
+    private var currentFarmSession: FarmSession? = null
+    private var farmSessionStartMs = 0L
+    private var farmCoinsThisSession = 0
+
+    // ── v2: Gamepad config ────────────────────────────────────────────────────
+    private var gamepadConfig: GamepadConfig = GamepadConfig()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        // Full-screen immersive
         requestWindowFeature(Window.FEATURE_NO_TITLE)
         window.decorView.systemUiVisibility = (
             View.SYSTEM_UI_FLAG_FULLSCREEN or
@@ -98,667 +82,542 @@ class GameplayActivity : AppCompatActivity() {
         binding = ActivityGameplayBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        gameUrl   = intent.getStringExtra(Constants.EXTRA_GAME_URL) ?: ""
+        gameUrl   = intent.getStringExtra(Constants.EXTRA_GAME_URL)   ?: ""
         profileId = intent.getStringExtra(Constants.EXTRA_PROFILE_ID) ?: ""
+        autoFarmEnabled = intent.getBooleanExtra(Constants.EXTRA_AUTO_FARM, false)
 
-        if (gameUrl.isEmpty()) { finish(); return }
-
-        loadProfile()
+        loadGamepadConfig()
+        setupProfile()
         setupWebView()
-        setupUI()
-        binding.webView.loadUrl(gameUrl)
+        setupGamepad()
+        setupFarmManager()
+        setupErrorRecovery()
+        setupControls()
+        setupFarmStatusView()
+
+        if (gameUrl.isNotEmpty()) binding.webView.loadUrl(gameUrl)
     }
 
-    // ── Profile ──────────────────────────────────────────────────────────────
+    // ── Setup ─────────────────────────────────────────────────────────────────
 
-    private fun loadProfile() {
+    private fun loadGamepadConfig() {
+        val prefs = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)
+        val json = prefs.getString(Constants.KEY_GAMEPAD_CONFIG, null)
+        if (json != null) {
+            try {
+                gamepadConfig = com.google.gson.Gson().fromJson(json, GamepadConfig::class.java)
+            } catch (_: Exception) {}
+        }
+        HapticManager.setStrength(gamepadConfig.hapticStrength)
+    }
+
+    private fun setupProfile() {
         if (profileId.isEmpty()) return
         val profile = ProfileStorage.getProfile(this, profileId) ?: return
         isCanvasMode = profile.isCanvasMode
 
+        val sorted = profile.controls.sortedBy { it.quadrantPriority }
         if (isCanvasMode) {
-            // Canvas-quadrant mode: keycodes are embedded in quadrantKeys JSON per zone
-            dpadQuadrant   = profile.controls.firstOrNull { it.quadrantZone == "DPAD" }
-            actionQuadrant = profile.controls.firstOrNull { it.quadrantZone == "ACTION" }
-            uiQuadrant     = profile.controls.firstOrNull { it.quadrantZone == "UI" }
-            clickQuadrant  = profile.controls.firstOrNull { it.quadrantZone == "CANVAS_CLICK" }
-
-            // Also populate the legacy lists from keyboard controls in the profile
-            // so the existing gamepad dispatch logic works without changes
-            val kbControls = profile.controls.filter { it.type == ControlType.KEYBOARD }
-            movementControls = kbControls.filter { it.category == ControlCategory.MOVEMENT }
-                .sortedByDescending { it.frequency }
-            actionControls   = kbControls.filter { it.category == ControlCategory.ACTION }
-                .sortedByDescending { it.frequency }
-            uiControls       = kbControls.filter { it.category == ControlCategory.UI }
-                .sortedByDescending { it.frequency }
+            dpadQuadrant   = sorted.firstOrNull { it.quadrantZone == "DPAD" }
+            actionQuadrant = sorted.firstOrNull { it.quadrantZone == "ACTION" }
+            uiQuadrant     = sorted.firstOrNull { it.quadrantZone == "UI" }
+            clickQuadrant  = sorted.firstOrNull { it.quadrantZone == "CANVAS_CLICK" }
         } else {
-            // Legacy DOM-element mode
             movementControls = profile.controls.filter { it.category == ControlCategory.MOVEMENT }
-                .sortedByDescending { it.frequency }
             actionControls   = profile.controls.filter { it.category == ControlCategory.ACTION }
-                .sortedByDescending { it.frequency }
             uiControls       = profile.controls.filter { it.category == ControlCategory.UI }
-                .sortedByDescending { it.frequency }
         }
     }
 
-    // ── WebView setup ─────────────────────────────────────────────────────────
-
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView() {
-        val ws = binding.webView.settings
-        ws.javaScriptEnabled       = true
-        ws.domStorageEnabled       = true
-        ws.loadWithOverviewMode    = true
-        ws.useWideViewPort         = true
-        ws.mixedContentMode        = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-        ws.mediaPlaybackRequiresUserGesture = false
-        ws.allowContentAccess      = true
-        ws.allowFileAccess         = true
-        ws.setSupportZoom(true)
-        ws.builtInZoomControls     = false
-        ws.displayZoomControls     = false
-        // Desktop user-agent so CP servers send the full game
-        ws.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-
-        WebView.setWebContentsDebuggingEnabled(false)
-
-        cppsInfo = CppsLoginHandler.detect(gameUrl)
+        with(binding.webView.settings) {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            databaseEnabled = true
+            allowFileAccess = true
+            allowContentAccess = true
+            mediaPlaybackRequiresUserGesture = false
+            useWideViewPort = true
+            loadWithOverviewMode = true
+            setSupportZoom(true)
+            builtInZoomControls = false
+            displayZoomControls = false
+            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            cacheMode = WebSettings.LOAD_DEFAULT
+            userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/125.0.0.0 Safari/537.36"
+        }
 
         binding.webView.webViewClient = object : WebViewClient() {
-
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 binding.loadingBar.visibility = View.VISIBLE
                 cursorInjected = false
+                loginOffered = false
+                // Inject game analysis hooks early
+                view.evaluateJavascript(GameAnalyzerJS.EARLY_HOOK_SCRIPT) { _ -> }
             }
 
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
                 binding.loadingBar.visibility = View.GONE
-                handler.postDelayed({ onGamePageReady(url) }, 1500)
+                errorRecovery.onPageFinished(url)
+
+                val info = CppsLoginHandler.detect(url)
+                if (info != null) {
+                    cppsInfo = info
+                    handler.postDelayed({ handleLoginDetection(url, info) }, 1500)
+                } else {
+                    handler.postDelayed({ injectVirtualCursor() }, 1000)
+                }
             }
 
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
-                if (request.isForMainFrame) binding.loadingBar.visibility = View.GONE
+                super.onReceivedError(view, request, error)
+                if (request.isForMainFrame) {
+                    errorRecovery.onPageLoadError(
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M)
+                            error.errorCode else -1,
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M)
+                            error.description.toString() else "Load error",
+                        request.url.toString()
+                    )
+                }
             }
 
-            @Deprecated("Deprecated")
-            override fun onReceivedError(view: WebView, code: Int, desc: String, url: String) {
-                binding.loadingBar.visibility = View.GONE
-            }
-
-            // Allow navigation within the same CPPS (login → game redirect)
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                val uri = request.url.toString()
-                // Only override if navigating away from the CPPS entirely
-                val isSameDomain = cppsInfo?.let { uri.contains(it.domain) } ?: true
-                return if (!isSameDomain) {
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(uri)))
-                    true
-                } else false
+                val url = request.url.toString()
+                return if (CppsLoginHandler.isCpps(url)) { view.loadUrl(url); true } else false
+            }
+        }
+
+        binding.webView.webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView, newProgress: Int) {
+                if (newProgress == 100) binding.loadingBar.visibility = View.GONE
+            }
+            override fun onJsAlert(view: WebView, url: String, message: String, result: JsResult): Boolean {
+                result.confirm(); return true
+            }
+            override fun onConsoleMessage(msg: ConsoleMessage): Boolean = true
+        }
+    }
+
+    private fun setupGamepad() {
+        binding.virtualGamepad.config = gamepadConfig
+        binding.virtualGamepad.listener = this
+    }
+
+    private fun setupFarmManager() {
+        farmManager = CoinFarmManager(binding.webView, this)
+        if (autoFarmEnabled) {
+            farmManager.start(autoFarm = true)
+        }
+    }
+
+    private fun setupErrorRecovery() {
+        errorRecovery = ErrorRecoveryManager(binding.webView, this)
+        errorRecovery.startMonitoring(gameUrl)
+    }
+
+    private fun setupFarmStatusView() {
+        // Farm status updates happen via FarmListener callbacks
+        binding.farmStatusView.update(MinigameType.NONE, 0, 0, false)
+    }
+
+    private fun setupControls() {
+        binding.btnBack.setOnClickListener { confirmExit() }
+
+        binding.btnToggleGamepad.setOnClickListener {
+            gamepadVisible = !gamepadVisible
+            binding.virtualGamepad.visibility = if (gamepadVisible) View.VISIBLE else View.INVISIBLE
+            val icon = if (gamepadVisible) R.drawable.ic_gamepad else android.R.drawable.ic_menu_close_clear_cancel
+            binding.btnToggleGamepad.setImageResource(icon)
+        }
+
+        binding.btnToggleOverlay.setOnClickListener { toggleOverlay() }
+
+        binding.btnFarm.setOnClickListener { showFarmDialog() }
+
+        binding.btnSettings.setOnClickListener {
+            startActivity(Intent(this, GamepadSettingsActivity::class.java))
+        }
+    }
+
+    // ── VirtualGamepadView.GamepadListener ────────────────────────────────────
+
+    override fun onStickMove(dx: Float, dy: Float) {
+        val js = buildMoveCursorJs(dx, dy)
+        binding.webView.evaluateJavascript(js) { _ -> }
+    }
+
+    override fun onStickRelease() {
+        // No-op — cursor stays where it was
+    }
+
+    override fun onButtonDown(button: VirtualGamepadView.Btn) {
+        when (button) {
+            VirtualGamepadView.Btn.A     -> injectClick()
+            VirtualGamepadView.Btn.B     -> injectKey(27) // Esc
+            VirtualGamepadView.Btn.X     -> injectKey(69) // E
+            VirtualGamepadView.Btn.Y     -> toggleOverlay()
+            VirtualGamepadView.Btn.L1    -> injectKey(84) // T (Chat)
+            VirtualGamepadView.Btn.R1    -> injectKey(77) // M (Map)
+            VirtualGamepadView.Btn.L2    -> injectKey(73) // I (Inventory)
+            VirtualGamepadView.Btn.L3    -> injectKey(84) // T
+            VirtualGamepadView.Btn.START -> injectKey(13) // Enter
+        }
+    }
+
+    override fun onButtonUp(button: VirtualGamepadView.Btn) {
+        // Fire keyup events for held keys
+        val keyCode = when (button) {
+            VirtualGamepadView.Btn.B  -> 27
+            VirtualGamepadView.Btn.X  -> 69
+            VirtualGamepadView.Btn.L1 -> 84
+            VirtualGamepadView.Btn.R1 -> 77
+            VirtualGamepadView.Btn.L2 -> 73
+            else -> return
+        }
+        injectKeyUp(keyCode)
+    }
+
+    // ── CoinFarmManager.FarmListener ──────────────────────────────────────────
+
+    override fun onMinigameDetected(type: MinigameType) {
+        runOnUiThread {
+            if (type != MinigameType.NONE && type != MinigameType.UNKNOWN) {
+                val msg = "🎮 ${type.displayName} detectado!"
+                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
             }
         }
     }
 
-    private fun onGamePageReady(url: String) {
-        val info = cppsInfo
-
-        // Step 1 – Detect login state
-        binding.webView.evaluateJavascript(CppsLoginHandler.DETECT_LOGIN_STATE_JS) { json ->
-            val hasHtmlForm = json.contains("\"hasHtmlForm\":true")
-            val hasCanvas   = json.contains("\"hasCanvas\":true")
-
-            when {
-                // HTML form login page detected → offer credential injection
-                hasHtmlForm && !loginOffered -> {
-                    loginOffered = true
-                    runOnUiThread { offerHtmlLogin(info, json) }
-                }
-                // Canvas game (no HTML form) → inject virtual cursor
-                hasCanvas -> {
-                    runOnUiThread { injectVirtualCursor() }
-                }
-                else -> {
-                    // Generic game page — inject cursor anyway
-                    runOnUiThread { injectVirtualCursor() }
-                }
-            }
+    override fun onFarmStarted(type: MinigameType) {
+        runOnUiThread {
+            farmSessionStartMs = System.currentTimeMillis()
+            farmCoinsThisSession = 0
+            binding.farmStatusView.update(type, 0, farmSessionStartMs, true)
+            binding.btnFarm.setColorFilter(android.graphics.Color.parseColor("#FF00E676"))
+            HapticManager.vibrate(this, HapticManager.Feedback.FARM_START, gamepadConfig.hapticEnabled)
+            Toast.makeText(this, "🌾 Farm iniciado: ${type.displayName}", Toast.LENGTH_SHORT).show()
         }
     }
 
-    // ── Login handling ────────────────────────────────────────────────────────
+    override fun onFarmStopped(type: MinigameType, session: FarmSession) {
+        runOnUiThread {
+            StatsManager.saveStats(this, farmManager.stats)
+            binding.farmStatusView.update(MinigameType.NONE, 0, 0, false)
+            binding.btnFarm.clearColorFilter()
+            HapticManager.vibrate(this, HapticManager.Feedback.FARM_STOP, gamepadConfig.hapticEnabled)
+            val coins = StatsManager.formatCoins(session.coinsEarned)
+            Toast.makeText(this, "⏹ Farm parado. Coins: $coins", Toast.LENGTH_SHORT).show()
+        }
+    }
 
-    private fun offerHtmlLogin(info: CppsLoginHandler.CppsInfo?, detectedJson: String) {
-        // Extract selectors detected by JS (fall back to CPPS-specific ones)
-        val userSel   = extractJsonString(detectedJson, "usernameSel").ifEmpty {
-            info?.usernameSelector ?: "input[type='text']" }
-        val passSel   = extractJsonString(detectedJson, "passwordSel").ifEmpty {
-            info?.passwordSelector ?: "input[type='password']" }
-        val submitSel = extractJsonString(detectedJson, "submitSel").ifEmpty {
-            info?.submitSelector ?: "button[type='submit']" }
+    override fun onCoinsUpdated(sessionCoins: Int, totalCoins: Int) {
+        runOnUiThread {
+            farmCoinsThisSession = sessionCoins
+            val type = MinigameType.values().firstOrNull { farmManager.stats.sessionsByGame.containsKey(it.name) }
+                ?: MinigameType.NONE
+            binding.farmStatusView.update(type, sessionCoins, farmSessionStartMs, true)
+            HapticManager.vibrate(this, HapticManager.Feedback.COIN_EARNED, gamepadConfig.hapticEnabled)
+        }
+    }
 
-        val serverName = info?.displayName ?: "este servidor"
-        val domain     = CredentialStorage.domainFromUrl(gameUrl)
-        val saved      = CredentialStorage.load(this, domain)
+    override fun onError(type: MinigameType, message: String) {
+        runOnUiThread {
+            Toast.makeText(this, "⚠️ Farm: $message", Toast.LENGTH_SHORT).show()
+        }
+    }
 
-        if (saved != null) {
-            // ── Saved credentials exist — offer to use them directly ─────────
+    // ── ErrorRecoveryManager.RecoveryListener ────────────────────────────────
+
+    override fun onErrorDetected(type: ErrorRecoveryManager.ErrorType, message: String) {
+        runOnUiThread {
+            currentFarmSession?.errorsRecovered = (currentFarmSession?.errorsRecovered ?: 0) + 1
+        }
+    }
+
+    override fun onRecovering(attempt: Int) {
+        runOnUiThread {
+            Toast.makeText(this, "🔄 Recuperando jogo (tentativa $attempt)...", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onRecovered() {
+        runOnUiThread {
+            Toast.makeText(this, "✅ Jogo recuperado com sucesso!", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onRecoveryFailed(totalAttempts: Int) {
+        runOnUiThread {
+            HapticManager.vibrate(this, HapticManager.Feedback.ERROR, gamepadConfig.hapticEnabled)
             AlertDialog.Builder(this, R.style.Theme_GameMapper_Dialog)
-                .setTitle("Login — $serverName")
-                .setMessage(
-                    "Credenciais salvas encontradas para ${saved.username}.\n\n" +
-                    "Entrar automaticamente?"
-                )
-                .setPositiveButton("Sim, entrar") { _, _ ->
-                    injectAndLogin(saved.username, saved.decryptedPassword(),
-                                   userSel, passSel, submitSel)
-                }
-                .setNegativeButton("Usar outra conta") { _, _ ->
-                    showCredentialInputDialog(userSel, passSel, submitSel, serverName,
-                                              domain, prefillSaved = false)
-                }
-                .setNeutralButton("Digitar manualmente") { _, _ ->
-                    handler.postDelayed({ injectVirtualCursor() }, 5000)
-                }
-                .setCancelable(false)
-                .show()
-        } else {
-            // ── No saved credentials — ask whether to auto-fill ─────────────
-            AlertDialog.Builder(this, R.style.Theme_GameMapper_Dialog)
-                .setTitle("Login — $serverName")
-                .setMessage(
-                    "Uma tela de login foi detectada.\n\n" +
-                    "Quer que o GameMapper preencha suas credenciais automaticamente?"
-                )
-                .setPositiveButton("Sim, inserir dados") { _, _ ->
-                    showCredentialInputDialog(userSel, passSel, submitSel, serverName,
-                                              domain, prefillSaved = false)
-                }
-                .setNegativeButton("Não, vou digitar") { _, _ ->
-                    handler.postDelayed({ injectVirtualCursor() }, 5000)
-                }
-                .setCancelable(false)
+                .setTitle("⚠️ Falha na Recuperação")
+                .setMessage("Não foi possível recuperar o jogo após $totalAttempts tentativas.\n\nDeseja recarregar manualmente?")
+                .setPositiveButton("Recarregar") { _, _ -> binding.webView.loadUrl(gameUrl) }
+                .setNegativeButton("Sair") { _, _ -> finish() }
                 .show()
         }
     }
 
-    /** Inject credentials directly (called when saved creds are confirmed). */
-    private fun injectAndLogin(
-        username: String, password: String,
-        userSel: String, passSel: String, submitSel: String
-    ) {
-        val js = CppsLoginHandler.buildInjectCredentialsJS(
-            username, password, userSel, passSel, submitSel
+    // ── Farm Dialog ──────────────────────────────────────────────────────────
+
+    private fun showFarmDialog() {
+        val items = arrayOf(
+            "🌾 Auto-Farm (detectar minigame)",
+            "🛒 Cart Surfer (farm manual)",
+            "⛏️ Mineração (farm manual)",
+            "🎣 Pesca (farm manual)",
+            "🐧 Puffle Roundup (farm manual)",
+            "👨‍🍳 Pizza Job (farm manual)",
+            "⏹ Parar todos os farms",
+            "📊 Ver estatísticas"
         )
-        binding.webView.evaluateJavascript(js) { result ->
-            runOnUiThread {
-                if (result.contains("\"injected\":true")) {
-                    Toast.makeText(this, "Login enviado automaticamente!", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(this, "Login enviado…", Toast.LENGTH_SHORT).show()
-                }
-                handler.postDelayed({ injectVirtualCursor() }, 4000)
-            }
-        }
-    }
-
-    private fun showCredentialInputDialog(
-        userSel: String, passSel: String, submitSel: String,
-        serverName: String, domain: String, prefillSaved: Boolean
-    ) {
-        val inflater = layoutInflater
-        val view     = inflater.inflate(R.layout.dialog_login_input, null)
-
-        val etUser  = view.findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.etUsername)
-        val etPass  = view.findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.etPassword)
-        val cbSave  = view.findViewById<android.widget.CheckBox>(R.id.cbRememberCredentials)
-        val banner  = view.findViewById<android.view.View>(R.id.layoutSavedBanner)
-        val tvForget = view.findViewById<android.widget.TextView>(R.id.tvForgetCredentials)
-
-        // Pre-fill if we have saved credentials and caller allows it
-        val saved = if (prefillSaved) CredentialStorage.load(this, domain) else null
-        if (saved != null) {
-            etUser?.setText(saved.username)
-            etPass?.setText(saved.decryptedPassword())
-            banner?.visibility = android.view.View.VISIBLE
-            tvForget?.setOnClickListener {
-                CredentialStorage.delete(this, domain)
-                etUser?.text?.clear()
-                etPass?.text?.clear()
-                banner?.visibility = android.view.View.GONE
-                Toast.makeText(this, "Credenciais removidas", Toast.LENGTH_SHORT).show()
-            }
-        }
-
         AlertDialog.Builder(this, R.style.Theme_GameMapper_Dialog)
-            .setTitle("Credenciais — $serverName")
-            .setView(view)
-            .setPositiveButton("Entrar") { _, _ ->
-                val username = etUser?.text?.toString()?.trim() ?: ""
-                val password = etPass?.text?.toString() ?: ""
-                if (username.isNotEmpty() && password.isNotEmpty()) {
-                    // Save credentials if checkbox is checked
-                    if (cbSave?.isChecked == true) {
-                        CredentialStorage.save(this, domain, username, password)
-                        Toast.makeText(this, "Senha salva para $domain", Toast.LENGTH_SHORT).show()
-                    }
-                    injectAndLogin(username, password, userSel, passSel, submitSel)
-                } else {
-                    Toast.makeText(this, "Preencha usuário e senha", Toast.LENGTH_SHORT).show()
+            .setTitle("Auto-Farm de Coins")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> toggleAutoFarm()
+                    1 -> farmManager.startFarmManually(MinigameType.CART_SURFER)
+                    2 -> farmManager.startFarmManually(MinigameType.MINING)
+                    3 -> farmManager.startFarmManually(MinigameType.FISHING)
+                    4 -> farmManager.startFarmManually(MinigameType.PUFFLE_ROUNDUP)
+                    5 -> farmManager.startFarmManually(MinigameType.PIZZA_JOB)
+                    6 -> { farmManager.stopCurrentFarm(); Toast.makeText(this, "Farms parados", Toast.LENGTH_SHORT).show() }
+                    7 -> startActivity(Intent(this, FarmDashboardActivity::class.java))
                 }
             }
             .setNegativeButton("Cancelar", null)
             .show()
     }
 
-    // ── Virtual cursor ────────────────────────────────────────────────────────
+    private fun toggleAutoFarm() {
+        autoFarmEnabled = !autoFarmEnabled
+        farmManager.setAutoFarm(autoFarmEnabled)
+        if (autoFarmEnabled) farmManager.start(true)
+        val msg = if (autoFarmEnabled) "🌾 Auto-Farm ATIVADO" else "⏹ Auto-Farm DESATIVADO"
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    }
+
+    // ── JS injection helpers ─────────────────────────────────────────────────
 
     private fun injectVirtualCursor() {
         if (cursorInjected) return
-        binding.webView.evaluateJavascript(CppsLoginHandler.VIRTUAL_CURSOR_JS) { result ->
-            if (result != null && result != "null") {
-                cursorInjected = true
-            }
-        }
+        cursorInjected = true
+        val js = """
+(function() {
+    if (window.__gmapper_cursor) return;
+    window.__gmapper_cursor = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    var cur = document.createElement('div');
+    cur.id = '__gmapper_cursor_el';
+    cur.style.cssText = 'position:fixed;width:14px;height:14px;border-radius:50%;' +
+        'background:rgba(0,180,255,0.85);border:2px solid white;box-shadow:0 0 8px #00B4FF;' +
+        'pointer-events:none;z-index:999999;transform:translate(-50%,-50%);' +
+        'transition:left 0.05s,top 0.05s;left:50%;top:50%;';
+    document.body.appendChild(cur);
+})();
+""".trimIndent()
+        binding.webView.evaluateJavascript(js) { _ -> }
     }
 
-    // ── UI / overlay ──────────────────────────────────────────────────────────
+    private fun buildMoveCursorJs(dx: Float, dy: Float): String = """
+(function() {
+    if (!window.__gmapper_cursor) return;
+    var c = window.__gmapper_cursor;
+    c.x = Math.max(0, Math.min(window.innerWidth,  c.x + ${dx}));
+    c.y = Math.max(0, Math.min(window.innerHeight, c.y + ${dy}));
+    var el = document.getElementById('__gmapper_cursor_el');
+    if (el) { el.style.left = c.x + 'px'; el.style.top = c.y + 'px'; }
+})();
+""".trimIndent()
 
-    // Track farm state so we can tint the button
-    private var farmActive = false
-
-    private fun setupUI() {
-        binding.btnBack.setOnClickListener { confirmExit() }
-        binding.btnToggleOverlay.setOnClickListener { toggleOverlay() }
-        binding.btnToggleGamepad.setOnClickListener { toggleVirtualGamepad() }
-        binding.btnFarm.setOnClickListener { toggleCartSurferFarm() }
-
-        wireVirtualGamepad()
-
-        // Build overlay content from profile
-        buildOverlayContent()
-        binding.overlayCard.visibility = View.GONE
+    private fun injectClick() {
+        val js = """
+(function() {
+    var c = window.__gmapper_cursor || { x: window.innerWidth/2, y: window.innerHeight/2 };
+    var el = document.elementFromPoint(c.x, c.y) || document.querySelector('canvas') || document.body;
+    ['mousedown','mouseup','click'].forEach(function(type) {
+        el.dispatchEvent(new MouseEvent(type, {clientX:c.x, clientY:c.y, bubbles:true, cancelable:true}));
+    });
+    // Visual feedback
+    var ring = document.createElement('div');
+    ring.style.cssText = 'position:fixed;width:30px;height:30px;border-radius:50%;' +
+        'border:2px solid #00B4FF;pointer-events:none;z-index:1000000;' +
+        'left:'+(c.x-15)+'px;top:'+(c.y-15)+'px;animation:none;opacity:1;';
+    document.body.appendChild(ring);
+    setTimeout(function() { ring.style.transition='all 0.3s'; ring.style.opacity='0'; ring.style.transform='scale(2)'; }, 10);
+    setTimeout(function() { document.body.removeChild(ring); }, 350);
+})();
+""".trimIndent()
+        binding.webView.evaluateJavascript(js) { _ -> }
     }
 
-    /** Toggle the Cart Surfer AFK farm loop on/off. */
-    private fun toggleCartSurferFarm() {
-        if (!cursorInjected) {
-            Toast.makeText(this,
-                "Injete o cursor primeiro (entre no jogo)", Toast.LENGTH_SHORT).show()
-            return
-        }
-        binding.webView.evaluateJavascript(CppsLoginHandler.CART_SURFER_FARM_TOGGLE_JS) { result ->
-            runOnUiThread {
-                farmActive = result.contains("started")
-                // Tint button gold when active, grey when stopped
-                val tintColor = if (farmActive) 0xFFFFD700.toInt() else 0xFF888888.toInt()
-                binding.btnFarm.setColorFilter(tintColor, android.graphics.PorterDuff.Mode.SRC_IN)
-                val msg = if (farmActive)
-                    "🤖 AFK Farm iniciado — Cart Surfer"
-                else
-                    "⏹ AFK Farm parado"
-                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
-            }
-        }
+    private fun injectKey(keyCode: Int) {
+        val js = """
+(function() {
+    var target = document.querySelector('canvas') || document.activeElement || document.body;
+    target.dispatchEvent(new KeyboardEvent('keydown', {keyCode:$keyCode,which:$keyCode,bubbles:true,cancelable:true}));
+    setTimeout(function() {
+        target.dispatchEvent(new KeyboardEvent('keyup', {keyCode:$keyCode,which:$keyCode,bubbles:true,cancelable:true}));
+    }, 80);
+})();
+""".trimIndent()
+        binding.webView.evaluateJavascript(js) { _ -> }
     }
 
-    private fun toggleVirtualGamepad() {
-        gamepadVisible = !gamepadVisible
-        binding.virtualGamepad.visibility = if (gamepadVisible) View.VISIBLE else View.GONE
+    private fun injectKeyUp(keyCode: Int) {
+        val js = """
+(function() {
+    var target = document.querySelector('canvas') || document.activeElement || document.body;
+    target.dispatchEvent(new KeyboardEvent('keyup', {keyCode:$keyCode,which:$keyCode,bubbles:true,cancelable:true}));
+})();
+""".trimIndent()
+        binding.webView.evaluateJavascript(js) { _ -> }
     }
 
-    private fun wireVirtualGamepad() {
-        binding.virtualGamepad.listener = object : VirtualGamepadView.GamepadListener {
-
-            override fun onStickMove(dx: Float, dy: Float) {
-                // VirtualGamepadView already multiplied by movementSpeed — call JS directly
-                // to avoid double-scaling (do NOT route through moveCursor()).
-                moveCursorDirect(dx, dy)
-            }
-
-            override fun onStickRelease() {
-                // Cursor movement stops naturally; nothing to do.
-            }
-
-            override fun onButtonDown(button: VirtualGamepadView.Btn) {
-                when (button) {
-                    VirtualGamepadView.Btn.A     -> triggerCursorClick()
-                    VirtualGamepadView.Btn.B     -> injectKeyEvent(27, "keydown")   // Esc
-                    VirtualGamepadView.Btn.X     -> injectKeyEvent(69, "keydown")   // E – interact
-                    VirtualGamepadView.Btn.Y     -> toggleOverlay()
-                    VirtualGamepadView.Btn.L1    -> injectKeyEvent(84, "keydown")   // T – chat
-                    VirtualGamepadView.Btn.R1    -> injectKeyEvent(77, "keydown")   // M – map
-                    VirtualGamepadView.Btn.L2    -> injectKeyEvent(73, "keydown")   // I – inventory
-                    VirtualGamepadView.Btn.START -> injectKeyEvent(13, "keydown")   // Enter
-                }
-            }
-
-            override fun onButtonUp(button: VirtualGamepadView.Btn) {
-                when (button) {
-                    VirtualGamepadView.Btn.B     -> injectKeyEvent(27, "keyup")
-                    VirtualGamepadView.Btn.X     -> injectKeyEvent(69, "keyup")
-                    VirtualGamepadView.Btn.L1    -> injectKeyEvent(84, "keyup")
-                    VirtualGamepadView.Btn.R1    -> injectKeyEvent(77, "keyup")
-                    VirtualGamepadView.Btn.L2    -> injectKeyEvent(73, "keyup")
-                    VirtualGamepadView.Btn.START -> injectKeyEvent(13, "keyup")
-                    else -> { /* A and Y have no keyup action */ }
-                }
-            }
-        }
-    }
-
-    private fun buildOverlayContent() {
-        val lines = StringBuilder()
-
-        if (isCanvasMode) {
-            // ── Canvas-quadrant mode overlay ────────────────────────────────
-            lines.appendLine("🎮 Modo Canvas Ativo")
-            lines.appendLine()
-
-            // D-Pad zone
-            val dpad = dpadQuadrant
-            if (dpad != null) {
-                lines.appendLine("Analógico esquerdo / D-pad")
-                lines.appendLine("  → Move cursor virtual na ilha")
-                val dpadKeys = parseFlatKeys(dpad.quadrantKeys)
-                dpadKeys.forEach { k -> lines.appendLine("    ${k.first} = ${k.second}") }
-                lines.appendLine()
-            }
-
-            // Action buttons zone
-            val act = actionQuadrant
-            if (act != null) {
-                lines.appendLine("Botões de Ação (quadrante inferior direito)")
-                val actKeys = parseFlatKeys(act.quadrantKeys)
-                val btnLabels = listOf("Sul [A]", "Leste [B]", "Norte [X]", "Oeste [Y]")
-                actKeys.forEachIndexed { i, k ->
-                    val btn = btnLabels.getOrElse(i) { "[?]" }
-                    lines.appendLine("  $btn → ${k.second} (${k.first})")
-                }
-                lines.appendLine()
-            }
-
-            // UI zone
-            val ui = uiQuadrant
-            if (ui != null) {
-                lines.appendLine("Interface (canto superior direito)")
-                val uiKeys = parseFlatKeys(ui.quadrantKeys)
-                val uiBtns = listOf("[L1]", "[R1]", "[L2]")
-                uiKeys.forEachIndexed { i, k ->
-                    lines.appendLine("  ${uiBtns.getOrElse(i){ "[?]" }} → ${k.second}")
-                }
-                lines.appendLine()
-            }
-
-            // Click-to-move
-            if (clickQuadrant != null) {
-                lines.appendLine("[A] → Clique no canvas (mover pinguim)")
-            }
-
-            lines.appendLine()
-            lines.appendLine("[Y]     → Fechar este painel")
-            lines.appendLine("[Start] → Enter")
-            lines.appendLine("[Sel]   → T (Chat)")
-
-        } else {
-            // ── Legacy DOM-element mode overlay ────────────────────────────
-            lines.appendLine("🎮 Mapeamento ativo")
-            lines.appendLine()
-
-            val movKeys = movementControls.take(4)
-            if (movKeys.isNotEmpty()) {
-                lines.appendLine("D-pad / Analógico → Cursor")
-                lines.appendLine("  ↑↓←→  mover cursor na tela")
-                lines.appendLine("  [A] → Clique (mover pinguim)")
-            } else {
-                lines.appendLine("  [A]  → Clique / Ação principal")
-            }
-
-            actionControls.forEachIndexed { i, ctrl ->
-                if (i < 2) {
-                    val btn = listOf("[B]", "[X]")[i]
-                    lines.appendLine("  $btn  → ${ctrl.label}")
-                }
-            }
-            uiControls.forEachIndexed { i, ctrl ->
-                if (i < 4) {
-                    val btn = listOf("[L1]", "[R1]", "[Start]", "[Select]")[i]
-                    lines.appendLine("  $btn  → ${ctrl.label}")
-                }
-            }
-
-            lines.appendLine()
-            lines.appendLine("[Y]      → Fechar este painel")
-            lines.appendLine("[Start]  → Enter / Mapa (M)")
-            lines.appendLine("[Select] → Chat (T)")
-        }
-
-        binding.tvOverlayContent.text = lines.toString()
-    }
-
-    /**
-     * Parses the quadrantKeys JSON string (stored as "[{keyCode,label,direction},…]")
-     * into a list of (direction, label) pairs for overlay display.
-     */
-    private fun parseFlatKeys(quadrantKeysJson: String?): List<Pair<String, String>> {
-        if (quadrantKeysJson.isNullOrEmpty()) return emptyList()
-        return try {
-            val arr = JSONArray(quadrantKeysJson)
-            (0 until arr.length()).map { i ->
-                val obj = arr.getJSONObject(i)
-                obj.optString("direction", "?") to obj.optString("label", "?")
-            }
-        } catch (e: Exception) {
-            emptyList()
-        }
-    }
+    // ── Overlay ───────────────────────────────────────────────────────────────
 
     private fun toggleOverlay() {
         overlayVisible = !overlayVisible
-        binding.overlayCard.visibility = if (overlayVisible) View.VISIBLE else View.GONE
+        binding.overlayContainer.visibility = if (overlayVisible) View.VISIBLE else View.GONE
     }
 
-    // ── Gamepad input ─────────────────────────────────────────────────────────
+    // ── Login detection ───────────────────────────────────────────────────────
 
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        val kc     = event.keyCode
-        val isDown = event.action == KeyEvent.ACTION_DOWN
-        val isUp   = event.action == KeyEvent.ACTION_UP
+    private fun handleLoginDetection(url: String, info: CppsLoginHandler.CppsInfo) {
+        if (loginOffered || info.loginType == CppsLoginHandler.LoginType.CANVAS_BASED) {
+            handler.postDelayed({ injectVirtualCursor() }, 2000)
+            return
+        }
+        loginOffered = true
+        val domain  = CppsLoginHandler.domainFromUrl(url)
+        val userSel = info.usernameSelector ?: "input[name='username']"
+        val passSel = info.passwordSelector  ?: "input[type='password']"
+        val subSel  = info.submitSelector    ?: "button[type='submit']"
 
-        // Let the WebView handle regular key input when it has focus
-        // (typing in CP chat box, etc.) — only intercept gamepad buttons
-        if (!isGamepadButton(kc)) return super.dispatchKeyEvent(event)
+        val saved = CredentialStorage.load(this, domain)
+        if (saved != null) {
+            AlertDialog.Builder(this, R.style.Theme_GameMapper_Dialog)
+                .setTitle("Login — ${info.displayName}")
+                .setMessage("Credenciais salvas para ${saved.username}.\n\nEntrar automaticamente?")
+                .setPositiveButton("Sim") { _, _ ->
+                    injectAndLogin(saved.username, saved.decryptedPassword(), userSel, passSel, subSel)
+                }
+                .setNegativeButton("Não") { _, _ -> injectVirtualCursor() }
+                .show()
+        } else {
+            handler.postDelayed({ injectVirtualCursor() }, 3000)
+        }
+    }
 
-        when (kc) {
-            // ── D-pad ─────────────────────────────────────────────
-            KeyEvent.KEYCODE_DPAD_UP    -> if (isDown) moveCursor(0f, -CURSOR_STEP)
-            KeyEvent.KEYCODE_DPAD_DOWN  -> if (isDown) moveCursor(0f, +CURSOR_STEP)
-            KeyEvent.KEYCODE_DPAD_LEFT  -> if (isDown) moveCursor(-CURSOR_STEP, 0f)
-            KeyEvent.KEYCODE_DPAD_RIGHT -> if (isDown) moveCursor(+CURSOR_STEP, 0f)
-
-            // ── Face buttons ──────────────────────────────────────
-            KeyEvent.KEYCODE_BUTTON_A -> {
-                // A = click at cursor (move penguin / interact)
-                if (isDown) triggerCursorClick()
-            }
-            KeyEvent.KEYCODE_BUTTON_B -> {
-                // B = second action control, or Esc
-                val ctrl = actionControls.getOrNull(1)
-                val code = ctrl?.keyCode?.toIntOrNull() ?: 27 // Esc default
-                if (isDown) injectKeyEvent(code, "keydown")
-                if (isUp)   injectKeyEvent(code, "keyup")
-            }
-            KeyEvent.KEYCODE_BUTTON_X -> {
-                // X = interaction control, or E
-                val ctrl = actionControls.getOrNull(0)
-                    ?: movementControls.getOrNull(0)
-                val code = ctrl?.keyCode?.toIntOrNull() ?: 69 // E default
-                if (isDown) injectKeyEvent(code, "keydown")
-                if (isUp)   injectKeyEvent(code, "keyup")
-            }
-            KeyEvent.KEYCODE_BUTTON_Y -> {
-                // Y = toggle overlay
-                if (isDown) toggleOverlay()
-            }
-
-            // ── Bumpers / Triggers ────────────────────────────────
-            KeyEvent.KEYCODE_BUTTON_L1 -> {
-                val ctrl = uiControls.getOrNull(0)
-                val code = ctrl?.keyCode?.toIntOrNull() ?: 77 // M (map) default
-                if (isDown) injectKeyEvent(code, "keydown")
-                if (isUp)   injectKeyEvent(code, "keyup")
-            }
-            KeyEvent.KEYCODE_BUTTON_R1 -> {
-                val ctrl = uiControls.getOrNull(1)
-                val code = ctrl?.keyCode?.toIntOrNull() ?: 73 // I (inventory) default
-                if (isDown) injectKeyEvent(code, "keydown")
-                if (isUp)   injectKeyEvent(code, "keyup")
-            }
-
-            // ── Start / Select ────────────────────────────────────
-            KeyEvent.KEYCODE_BUTTON_START -> {
-                // Start = Enter (confirm actions / open map menu)
-                if (isDown) injectKeyEvent(13, "keydown")
-                if (isUp)   injectKeyEvent(13, "keyup")
-            }
-            KeyEvent.KEYCODE_BUTTON_SELECT,
-            KeyEvent.KEYCODE_BACK -> {
-                // Select = T (open chat in CP) / Back on non-gamepad = go back
-                if (kc == KeyEvent.KEYCODE_BACK) {
-                    if (isDown) { confirmExit(); return true }
+    private fun injectAndLogin(username: String, password: String,
+                               userSel: String, passSel: String, subSel: String) {
+        val js = CppsLoginHandler.buildInjectCredentialsJS(username, password, userSel, passSel, subSel)
+        binding.webView.evaluateJavascript(js) { result ->
+            runOnUiThread {
+                if (result?.contains("\"injected\":true") == true) {
+                    Toast.makeText(this, "Login automático enviado!", Toast.LENGTH_SHORT).show()
                 } else {
-                    if (isDown) injectKeyEvent(84, "keydown") // T
-                    if (isUp)   injectKeyEvent(84, "keyup")
+                    Toast.makeText(this, "Falha no login automático.", Toast.LENGTH_SHORT).show()
+                    injectVirtualCursor()
                 }
             }
+        }
+    }
 
-            // ── Left stick button ─────────────────────────────────
-            KeyEvent.KEYCODE_BUTTON_THUMBL -> {
-                if (isDown) triggerCursorClick()
+    // ── Hardware gamepad (physical controller) ────────────────────────────────
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (event?.repeatCount ?: 0 > 0) return super.onKeyDown(keyCode, event)
+        return when (keyCode) {
+            KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_THUMBL -> { injectClick(); true }
+            KeyEvent.KEYCODE_BUTTON_B  -> { injectKey(27); true }
+            KeyEvent.KEYCODE_BUTTON_X  -> { injectKey(69); true }
+            KeyEvent.KEYCODE_BUTTON_Y  -> { toggleOverlay(); true }
+            KeyEvent.KEYCODE_BUTTON_L1 -> { injectKey(84); true }
+            KeyEvent.KEYCODE_BUTTON_R1 -> { injectKey(77); true }
+            KeyEvent.KEYCODE_BUTTON_START -> { injectKey(13); true }
+            KeyEvent.KEYCODE_BUTTON_SELECT -> { injectKey(84); true }
+            else -> super.onKeyDown(keyCode, event)
+        }
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+        return when (keyCode) {
+            KeyEvent.KEYCODE_BUTTON_B  -> { injectKeyUp(27); true }
+            KeyEvent.KEYCODE_BUTTON_X  -> { injectKeyUp(69); true }
+            KeyEvent.KEYCODE_BUTTON_L1 -> { injectKeyUp(84); true }
+            KeyEvent.KEYCODE_BUTTON_R1 -> { injectKeyUp(77); true }
+            else -> super.onKeyUp(keyCode, event)
+        }
+    }
+
+    override fun onGenericMotionEvent(event: MotionEvent?): Boolean {
+        if (event == null) return super.onGenericMotionEvent(event)
+        if (event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK &&
+            event.action == MotionEvent.ACTION_MOVE) {
+            val dx = event.getAxisValue(MotionEvent.AXIS_X)
+            val dy = event.getAxisValue(MotionEvent.AXIS_Y)
+            val deadzone = gamepadConfig.stickDeadzone
+            val speed = gamepadConfig.movementSpeed
+            if (kotlin.math.hypot(dx.toDouble(), dy.toDouble()) > deadzone) {
+                onStickMove(dx * speed, dy * speed)
             }
+            return true
         }
-        return true
+        return super.onGenericMotionEvent(event)
     }
 
-    /**
-     * Handle analog stick axis events (continuous D-pad movement).
-     * Repeated fast movement when stick is pushed.
-     */
-    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
-        if (event.source and InputDevice.SOURCE_JOYSTICK != InputDevice.SOURCE_JOYSTICK)
-            return super.onGenericMotionEvent(event)
-
-        val x = event.getAxisValue(MotionEvent.AXIS_X)
-        val y = event.getAxisValue(MotionEvent.AXIS_Y)
-        val hatX = event.getAxisValue(MotionEvent.AXIS_HAT_X)
-        val hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
-
-        val deadzone = 0.25f
-        val effectiveX = if (Math.abs(x) > deadzone) x else hatX
-        val effectiveY = if (Math.abs(y) > deadzone) y else hatY
-
-        if (Math.abs(effectiveX) > deadzone || Math.abs(effectiveY) > deadzone) {
-            moveCursor(effectiveX * CURSOR_FAST_STEP, effectiveY * CURSOR_FAST_STEP)
-        }
-        return true
-    }
-
-    // ── JS helpers ────────────────────────────────────────────────────────────
-
-    private fun moveCursor(dx: Float, dy: Float) {
-        if (!cursorInjected) {
-            injectVirtualCursor()
-            handler.postDelayed({ moveCursor(dx, dy) }, 600)
-            return
-        }
-        binding.webView.evaluateJavascript(
-            "if(window.gmMoveCursor) gmMoveCursor(${dx.toInt()}, ${dy.toInt()});", null
-        )
-    }
-
-    private fun moveCursorDirect(dx: Float, dy: Float) {
-        // Values already scaled by VirtualGamepadView — call JS directly, no retry needed.
-        binding.webView.evaluateJavascript(
-            "if(window.gmMoveCursor) gmMoveCursor(${dx.toInt()}, ${dy.toInt()});", null
-        )
-    }
-
-    private fun triggerCursorClick() {
-        if (!cursorInjected) {
-            injectVirtualCursor()
-            handler.postDelayed({ triggerCursorClick() }, 600)
-            return
-        }
-        binding.webView.evaluateJavascript("if(window.gmClick) gmClick();", null)
-    }
-
-    private fun injectKeyEvent(keyCode: Int, type: String) {
-        binding.webView.evaluateJavascript(
-            "if(window.gmKey) gmKey($keyCode, '$type');", null
-        )
-    }
-
-    // ── Utility ───────────────────────────────────────────────────────────────
-
-    private fun isGamepadButton(kc: Int): Boolean = kc in listOf(
-        KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
-        KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
-        KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_B,
-        KeyEvent.KEYCODE_BUTTON_X, KeyEvent.KEYCODE_BUTTON_Y,
-        KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_BUTTON_R1,
-        KeyEvent.KEYCODE_BUTTON_L2, KeyEvent.KEYCODE_BUTTON_R2,
-        KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_BUTTON_SELECT,
-        KeyEvent.KEYCODE_BUTTON_THUMBL, KeyEvent.KEYCODE_BUTTON_THUMBR
-    )
-
-    private fun extractJsonString(json: String, key: String): String {
-        val pattern = Regex("\"$key\"\\s*:\\s*\"([^\"\\\\]*)\"")
-        return pattern.find(json)?.groupValues?.get(1) ?: ""
-    }
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     private fun confirmExit() {
         AlertDialog.Builder(this, R.style.Theme_GameMapper_Dialog)
             .setTitle("Sair do jogo?")
-            .setMessage("Isso vai fechar o jogo e voltar para o mapeamento.")
+            .setMessage("Isso vai fechar o jogo e voltar ao mapeamento.")
             .setPositiveButton("Sair") { _, _ -> finish() }
             .setNegativeButton("Continuar jogando", null)
             .show()
     }
 
-    // ── Lifecycle ─────────────────────────────────────────────────────────────
-
     override fun onResume() {
         super.onResume()
-        // Re-enter fullscreen after dialogs etc.
+        loadGamepadConfig()
+        binding.virtualGamepad.config = gamepadConfig
         window.decorView.systemUiVisibility = (
             View.SYSTEM_UI_FLAG_FULLSCREEN or
             View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         )
         binding.webView.onResume()
+        if (autoFarmEnabled) farmManager.start(true)
     }
 
     override fun onPause() {
         super.onPause()
         binding.webView.onPause()
+        farmManager.stop()
+        errorRecovery.stopMonitoring()
+        StatsManager.saveStats(this, farmManager.stats)
     }
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        farmManager.stop()
+        errorRecovery.stopMonitoring()
+        binding.virtualGamepad.cleanup()
         binding.webView.destroy()
         super.onDestroy()
     }
 
     override fun onBackPressed() {
-        if (overlayVisible) {
-            toggleOverlay()
-        } else if (binding.webView.canGoBack()) {
-            binding.webView.goBack()
-        } else {
-            confirmExit()
+        when {
+            overlayVisible -> toggleOverlay()
+            binding.webView.canGoBack() -> binding.webView.goBack()
+            else -> confirmExit()
         }
     }
 }

@@ -1,28 +1,52 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="primary">#1A1A2E</color>
-    <color name="primary_dark">#0D0D1A</color>
-    <color name="primary_variant">#16213E</color>
-    <color name="secondary">#0F3460</color>
-    <color name="accent">#E94560</color>
-    <color name="accent_light">#FF6B8A</color>
-    <color name="surface">#1E1E3F</color>
-    <color name="surface_variant">#252545</color>
-    <color name="background">#0D0D1A</color>
-    <color name="on_primary">#FFFFFF</color>
-    <color name="on_surface">#FFFFFF</color>
-    <color name="on_surface_medium">#B0B0CC</color>
-    <color name="on_surface_low">#606080</color>
-    <color name="card_bg">#1C1C3A</color>
-    <color name="card_stroke">#2A2A4A</color>
-    <color name="green_movement">#4CAF50</color>
-    <color name="red_action">#F44336</color>
-    <color name="blue_ui">#2196F3</color>
-    <color name="orange_interaction">#FF9800</color>
-    <color name="purple_keyboard">#7C4DFF</color>
-    <color name="teal_mouse">#0097A7</color>
-    <color name="pink_touch">#E91E63</color>
-    <color name="progress_bg">#2A2A4A</color>
-    <color name="white">#FFFFFF</color>
+    <!-- Core palette (dark game theme) -->
+    <color name="primary">#FF1A2040</color>
+    <color name="primary_dark">#FF0D1020</color>
+    <color name="primary_variant">#FF243060</color>
+    <color name="accent">#FF00B4FF</color>
+    <color name="accent_dark">#FF0066CC</color>
+    <color name="accent_green">#FF00E676</color>
+
+    <!-- Background layers -->
+    <color name="background">#FF0A0E1A</color>
+    <color name="surface">#FF141C30</color>
+    <color name="surface_variant">#FF1E2840</color>
+
+    <!-- Text -->
+    <color name="on_primary">#FFFFFFFF</color>
+    <color name="on_surface_high">#DDFFFFFF</color>
+    <color name="on_surface_medium">#99FFFFFF</color>
+    <color name="on_surface_low">#55FFFFFF</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- Transparent -->
     <color name="transparent">#00000000</color>
+
+    <!-- Gamepad button colors (default Neon Blue theme) -->
+    <color name="btn_a">#FF00E676</color>
+    <color name="btn_b">#FFFF1744</color>
+    <color name="btn_x">#FF2979FF</color>
+    <color name="btn_y">#FFFF9100</color>
+    <color name="btn_glow">#8800B4FF</color>
+
+    <!-- Neon accent colors -->
+    <color name="neon_blue">#FF00B4FF</color>
+    <color name="neon_green">#FF00E676</color>
+    <color name="neon_purple">#FFCC44FF</color>
+    <color name="neon_orange">#FFFF6600</color>
+    <color name="neon_pink">#FFFF0066</color>
+
+    <!-- Farm status colors -->
+    <color name="farm_active">#FF00E676</color>
+    <color name="farm_inactive">#FFFF4444</color>
+    <color name="coin_gold">#FFFFD700</color>
+
+    <!-- Keyboard/mapping colors (kept for compatibility) -->
+    <color name="purple_keyboard">#FFCC88FF</color>
+    <color name="keyboard">#FF667799</color>
+    <color name="mouse">#FF44AAFF</color>
+    <color name="touch">#FFFF6644</color>
+    <color name="canvas">#FF44CC88</color>
+    <color name="joystick">#FFFF9900</color>
 </resources>
