@@ -16,7 +16,9 @@ import com.gamemapper.R
 import com.gamemapper.databinding.ActivityGameplayBinding
 import com.gamemapper.models.ControlCategory
 import com.gamemapper.models.ControlModel
+import com.gamemapper.models.ControlProfile
 import com.gamemapper.models.ControlType
+import org.json.JSONArray
 import com.gamemapper.services.CppsLoginHandler
 import com.gamemapper.utils.Constants
 import com.gamemapper.utils.ProfileStorage
@@ -69,6 +71,13 @@ class GameplayActivity : AppCompatActivity() {
     private var actionControls   = listOf<ControlModel>()
     private var uiControls       = listOf<ControlModel>()
 
+    // Canvas-quadrant specific controls (set when profile.isCanvasMode == true)
+    private var dpadQuadrant:   ControlModel? = null
+    private var actionQuadrant: ControlModel? = null
+    private var uiQuadrant:     ControlModel? = null
+    private var clickQuadrant:  ControlModel? = null
+    private var isCanvasMode = false
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -100,12 +109,33 @@ class GameplayActivity : AppCompatActivity() {
     private fun loadProfile() {
         if (profileId.isEmpty()) return
         val profile = ProfileStorage.getProfile(this, profileId) ?: return
-        movementControls = profile.controls.filter { it.category == ControlCategory.MOVEMENT }
-            .sortedByDescending { it.frequency }
-        actionControls = profile.controls.filter { it.category == ControlCategory.ACTION }
-            .sortedByDescending { it.frequency }
-        uiControls = profile.controls.filter { it.category == ControlCategory.UI }
-            .sortedByDescending { it.frequency }
+        isCanvasMode = profile.isCanvasMode
+
+        if (isCanvasMode) {
+            // Canvas-quadrant mode: keycodes are embedded in quadrantKeys JSON per zone
+            dpadQuadrant   = profile.controls.firstOrNull { it.quadrantZone == "DPAD" }
+            actionQuadrant = profile.controls.firstOrNull { it.quadrantZone == "ACTION" }
+            uiQuadrant     = profile.controls.firstOrNull { it.quadrantZone == "UI" }
+            clickQuadrant  = profile.controls.firstOrNull { it.quadrantZone == "CANVAS_CLICK" }
+
+            // Also populate the legacy lists from keyboard controls in the profile
+            // so the existing gamepad dispatch logic works without changes
+            val kbControls = profile.controls.filter { it.type == ControlType.KEYBOARD }
+            movementControls = kbControls.filter { it.category == ControlCategory.MOVEMENT }
+                .sortedByDescending { it.frequency }
+            actionControls   = kbControls.filter { it.category == ControlCategory.ACTION }
+                .sortedByDescending { it.frequency }
+            uiControls       = kbControls.filter { it.category == ControlCategory.UI }
+                .sortedByDescending { it.frequency }
+        } else {
+            // Legacy DOM-element mode
+            movementControls = profile.controls.filter { it.category == ControlCategory.MOVEMENT }
+                .sortedByDescending { it.frequency }
+            actionControls   = profile.controls.filter { it.category == ControlCategory.ACTION }
+                .sortedByDescending { it.frequency }
+            uiControls       = profile.controls.filter { it.category == ControlCategory.UI }
+                .sortedByDescending { it.frequency }
+        }
     }
 
     // ── WebView setup ─────────────────────────────────────────────────────────
@@ -285,42 +315,108 @@ class GameplayActivity : AppCompatActivity() {
 
     private fun buildOverlayContent() {
         val lines = StringBuilder()
-        lines.appendLine("🎮 Mapeamento ativo")
-        lines.appendLine()
 
-        val assignedKeys = mutableListOf<String>()
+        if (isCanvasMode) {
+            // ── Canvas-quadrant mode overlay ────────────────────────────────
+            lines.appendLine("🎮 Modo Canvas Ativo")
+            lines.appendLine()
 
-        // Movement → D-pad + left stick
-        val movKeys = movementControls.take(4)
-        if (movKeys.isNotEmpty()) {
-            lines.appendLine("D-pad / Analógico → Cursor")
-            lines.appendLine("  ↑↓←→  mover cursor na tela")
-            lines.appendLine("  [A] → Clique (mover pinguim)")
+            // D-Pad zone
+            val dpad = dpadQuadrant
+            if (dpad != null) {
+                lines.appendLine("Analógico esquerdo / D-pad")
+                lines.appendLine("  → Move cursor virtual na ilha")
+                val dpadKeys = parseFlatKeys(dpad.quadrantKeys)
+                dpadKeys.forEach { k -> lines.appendLine("    ${k.first} = ${k.second}") }
+                lines.appendLine()
+            }
+
+            // Action buttons zone
+            val act = actionQuadrant
+            if (act != null) {
+                lines.appendLine("Botões de Ação (quadrante inferior direito)")
+                val actKeys = parseFlatKeys(act.quadrantKeys)
+                val btnLabels = listOf("Sul [A]", "Leste [B]", "Norte [X]", "Oeste [Y]")
+                actKeys.forEachIndexed { i, k ->
+                    val btn = btnLabels.getOrElse(i) { "[?]" }
+                    lines.appendLine("  $btn → ${k.second} (${k.first})")
+                }
+                lines.appendLine()
+            }
+
+            // UI zone
+            val ui = uiQuadrant
+            if (ui != null) {
+                lines.appendLine("Interface (canto superior direito)")
+                val uiKeys = parseFlatKeys(ui.quadrantKeys)
+                val uiBtns = listOf("[L1]", "[R1]", "[L2]")
+                uiKeys.forEachIndexed { i, k ->
+                    lines.appendLine("  ${uiBtns.getOrElse(i){ "[?]" }} → ${k.second}")
+                }
+                lines.appendLine()
+            }
+
+            // Click-to-move
+            if (clickQuadrant != null) {
+                lines.appendLine("[A] → Clique no canvas (mover pinguim)")
+            }
+
+            lines.appendLine()
+            lines.appendLine("[Y]     → Fechar este painel")
+            lines.appendLine("[Start] → Enter")
+            lines.appendLine("[Sel]   → T (Chat)")
+
         } else {
-            lines.appendLine("  [A]  → Clique / Ação principal")
-        }
+            // ── Legacy DOM-element mode overlay ────────────────────────────
+            lines.appendLine("🎮 Mapeamento ativo")
+            lines.appendLine()
 
-        actionControls.forEachIndexed { i, ctrl ->
-            val btn = listOf("[B]", "[X]")[i.coerceAtMost(1)]
-            if (i < 2) {
-                lines.appendLine("  $btn  → ${ctrl.label}")
-                assignedKeys.add(ctrl.label)
+            val movKeys = movementControls.take(4)
+            if (movKeys.isNotEmpty()) {
+                lines.appendLine("D-pad / Analógico → Cursor")
+                lines.appendLine("  ↑↓←→  mover cursor na tela")
+                lines.appendLine("  [A] → Clique (mover pinguim)")
+            } else {
+                lines.appendLine("  [A]  → Clique / Ação principal")
             }
-        }
 
-        uiControls.forEachIndexed { i, ctrl ->
-            val btn = listOf("[L1]", "[R1]", "[Start]", "[Select]")[i.coerceAtMost(3)]
-            if (i < 4) {
-                lines.appendLine("  $btn  → ${ctrl.label}")
+            actionControls.forEachIndexed { i, ctrl ->
+                if (i < 2) {
+                    val btn = listOf("[B]", "[X]")[i]
+                    lines.appendLine("  $btn  → ${ctrl.label}")
+                }
             }
-        }
+            uiControls.forEachIndexed { i, ctrl ->
+                if (i < 4) {
+                    val btn = listOf("[L1]", "[R1]", "[Start]", "[Select]")[i]
+                    lines.appendLine("  $btn  → ${ctrl.label}")
+                }
+            }
 
-        lines.appendLine()
-        lines.appendLine("[Y]      → Fechar este painel")
-        lines.appendLine("[Start]  → Enter / Mapa (M)")
-        lines.appendLine("[Select] → Chat (T)")
+            lines.appendLine()
+            lines.appendLine("[Y]      → Fechar este painel")
+            lines.appendLine("[Start]  → Enter / Mapa (M)")
+            lines.appendLine("[Select] → Chat (T)")
+        }
 
         binding.tvOverlayContent.text = lines.toString()
+    }
+
+    /**
+     * Parses the quadrantKeys JSON string (stored as "[{keyCode,label,direction},…]")
+     * into a list of (direction, label) pairs for overlay display.
+     */
+    private fun parseFlatKeys(quadrantKeysJson: String?): List<Pair<String, String>> {
+        if (quadrantKeysJson.isNullOrEmpty()) return emptyList()
+        return try {
+            val arr = JSONArray(quadrantKeysJson)
+            (0 until arr.length()).map { i ->
+                val obj = arr.getJSONObject(i)
+                obj.optString("direction", "?") to obj.optString("label", "?")
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
     }
 
     private fun toggleOverlay() {

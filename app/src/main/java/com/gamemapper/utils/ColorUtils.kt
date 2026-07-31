@@ -14,23 +14,25 @@ object ColorUtils {
     }
 
     fun getColorForType(type: ControlType): Int = when (type) {
-        ControlType.KEYBOARD        -> Color.parseColor("#7C4DFF")
-        ControlType.MOUSE_CLICK     -> Color.parseColor("#0097A7")
-        ControlType.MOUSE_MOVE      -> Color.parseColor("#00796B")
-        ControlType.TOUCH           -> Color.parseColor("#E91E63")
-        ControlType.CANVAS_ZONE     -> Color.parseColor("#FF5722")
-        ControlType.BUTTON_ELEMENT  -> Color.parseColor("#3F51B5")
-        ControlType.JOYSTICK        -> Color.parseColor("#795548")
+        ControlType.KEYBOARD         -> Color.parseColor("#7C4DFF")
+        ControlType.MOUSE_CLICK      -> Color.parseColor("#0097A7")
+        ControlType.MOUSE_MOVE       -> Color.parseColor("#00796B")
+        ControlType.TOUCH            -> Color.parseColor("#E91E63")
+        ControlType.CANVAS_ZONE      -> Color.parseColor("#FF5722")
+        ControlType.CANVAS_QUADRANT  -> Color.parseColor("#FF9800")
+        ControlType.BUTTON_ELEMENT   -> Color.parseColor("#3F51B5")
+        ControlType.JOYSTICK         -> Color.parseColor("#795548")
     }
 
     fun getLabelForType(type: ControlType): String = when (type) {
-        ControlType.KEYBOARD        -> "Teclado"
-        ControlType.MOUSE_CLICK     -> "Clique"
-        ControlType.MOUSE_MOVE      -> "Mover Mouse"
-        ControlType.TOUCH           -> "Toque"
-        ControlType.CANVAS_ZONE     -> "Zona Canvas"
-        ControlType.BUTTON_ELEMENT  -> "Botão"
-        ControlType.JOYSTICK        -> "Joystick"
+        ControlType.KEYBOARD         -> "Teclado"
+        ControlType.MOUSE_CLICK      -> "Clique"
+        ControlType.MOUSE_MOVE       -> "Mover Mouse"
+        ControlType.TOUCH            -> "Toque"
+        ControlType.CANVAS_ZONE      -> "Zona Canvas"
+        ControlType.CANVAS_QUADRANT  -> "Quadrante Canvas"
+        ControlType.BUTTON_ELEMENT   -> "Botão"
+        ControlType.JOYSTICK         -> "Joystick"
     }
 
     fun getLabelForCategory(category: ControlCategory): String = when (category) {
