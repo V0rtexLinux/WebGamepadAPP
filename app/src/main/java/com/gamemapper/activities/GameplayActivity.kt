@@ -590,6 +590,13 @@ class GameplayActivity : AppCompatActivity() {
         )
     }
 
+    private fun moveCursorDirect(dx: Float, dy: Float) {
+        // Values already scaled by VirtualGamepadView — call JS directly, no retry needed.
+        binding.webView.evaluateJavascript(
+            "if(window.gmMoveCursor) gmMoveCursor(${dx.toInt()}, ${dy.toInt()});", null
+        )
+    }
+
     private fun triggerCursorClick() {
         if (!cursorInjected) {
             injectVirtualCursor()
