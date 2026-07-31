@@ -85,6 +85,17 @@
             android:layout_marginTop="4dp"
             android:contentDescription="Ver mapeamento" />
 
+        <!-- Cart Surfer AFK farm toggle -->
+        <ImageButton
+            android:id="@+id/btnFarm"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_farm"
+            android:tint="#FFD700"
+            android:background="@drawable/ripple_circle"
+            android:layout_marginTop="4dp"
+            android:contentDescription="Farm AFK — Cart Surfer" />
+
     </LinearLayout>
 
     <!-- Mapping overlay card (bottom-left, toggled by btnToggleOverlay) -->

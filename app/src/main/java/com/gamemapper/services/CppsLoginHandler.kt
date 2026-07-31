@@ -419,4 +419,104 @@ object CppsLoginHandler {
     return 'ok';
 })();
 """.trimIndent()
+
+    // ── Cart Surfer AFK farmer ────────────────────────────────────────────────
+    /**
+     * Toggles the Cart Surfer AFK farm loop.
+     *  • First call  → starts the loop, returns "started"
+     *  • Second call → stops  the loop, returns "stopped"
+     *
+     * Trick rotation (max coins per cycle):
+     *   Flip (100) → Turn (10) → Run on Tracks (80) → Turn (10)
+     *   → Flip (100) → Turn (10) → Handstand (80) → Turn (10)   = 390 pts / 8 keys
+     *
+     * Requires VIRTUAL_CURSOR_JS (window.gmKey) to be injected first.
+     *
+     * Key codes used:
+     *   32 = Space  37 = ←Left  38 = ↑Up  39 = →Right  40 = ↓Down
+     */
+    val CART_SURFER_FARM_TOGGLE_JS = """
+(function() {
+    /* ── Stop if already running ────────────────────────────────────── */
+    if (window.__gm_farm_interval) {
+        clearInterval(window.__gm_farm_interval);
+        window.__gm_farm_interval = null;
+        var old = document.getElementById('__gm_farm_hud');
+        if (old) old.remove();
+        return 'stopped';
+    }
+
+    /* ── Trick table: [key1, key2_or_null, label, points] ────────── */
+    /* Rules:
+       - Same trick cannot be repeated back-to-back → we alternate.
+       - Turn (→ or ←) is a valid separator and gives 10 pts.
+       - Flip (↓+Space) gives 100 pts — highest single trick.
+       - Keys must be pressed sequentially, ~260 ms apart (Ruffle timing).  */
+    var tricks = [
+        { k1:40, k2:32, label:'Flip',          pts:100 },  // ↓ Space
+        { k1:39, k2:null, label:'Turn →',       pts:10  },  // →
+        { k1:40, k2:40, label:'Run on Tracks',  pts:80  },  // ↓↓
+        { k1:37, k2:null, label:'Turn ←',       pts:10  },  // ←
+        { k1:40, k2:32, label:'Flip',           pts:100 },  // ↓ Space
+        { k1:39, k2:null, label:'Turn →',       pts:10  },  // →
+        { k1:38, k2:38, label:'Handstand',      pts:80  },  // ↑↑
+        { k1:37, k2:null, label:'Turn ←',       pts:10  },  // ←
+        { k1:40, k2:32, label:'Flip',           pts:100 },  // ↓ Space
+        { k1:39, k2:null, label:'Turn →',       pts:10  },  // →
+        { k1:32, k2:39, label:'Spin →',         pts:80  },  // Space →
+        { k1:37, k2:null, label:'Turn ←',       pts:10  },  // ←
+    ];
+
+    var step        = 0;
+    var totalPts    = 0;
+    var TRICK_DELAY = 260;   /* ms between k1 and k2 */
+    var LOOP_MS     = 1900;  /* ms between tricks (Cart Surfer section window) */
+
+    /* ── HUD indicator ──────────────────────────────────────────────── */
+    var hud = document.createElement('div');
+    hud.id = '__gm_farm_hud';
+    hud.style.cssText = [
+        'position:fixed',
+        'top:10px',
+        'left:50%',
+        'transform:translateX(-50%)',
+        'background:rgba(0,0,0,0.75)',
+        'color:#FFD700',
+        'font:bold 13px/1.4 sans-serif',
+        'padding:5px 14px',
+        'border-radius:20px',
+        'border:1.5px solid #FFD700',
+        'z-index:2147483647',
+        'pointer-events:none',
+        'text-align:center'
+    ].join(';');
+    hud.innerHTML = '🤖 AFK Farm ON';
+    document.body.appendChild(hud);
+
+    /* ── Key press helper ───────────────────────────────────────────── */
+    function pressKey(code) {
+        if (typeof window.gmKey === 'function') {
+            window.gmKey(code, 'keydown');
+            setTimeout(function() { window.gmKey(code, 'keyup'); }, 120);
+        }
+    }
+
+    /* ── Main loop ──────────────────────────────────────────────────── */
+    window.__gm_farm_interval = setInterval(function() {
+        var t = tricks[step % tricks.length];
+        step++;
+
+        pressKey(t.k1);
+        if (t.k2 !== null) {
+            setTimeout(function() { pressKey(t.k2); }, TRICK_DELAY);
+        }
+
+        totalPts += t.pts;
+        hud.innerHTML = '🤖 ' + t.label + ' <span style="color:#aaffaa">+' + t.pts + '</span>'
+            + '<br><small style="color:#ccc">≈' + totalPts + ' pts esta sessão</small>';
+    }, LOOP_MS);
+
+    return 'started';
+})();
+""".trimIndent()
 }

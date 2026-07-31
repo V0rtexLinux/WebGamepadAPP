@@ -367,16 +367,42 @@ class GameplayActivity : AppCompatActivity() {
 
     // ── UI / overlay ──────────────────────────────────────────────────────────
 
+    // Track farm state so we can tint the button
+    private var farmActive = false
+
     private fun setupUI() {
         binding.btnBack.setOnClickListener { confirmExit() }
         binding.btnToggleOverlay.setOnClickListener { toggleOverlay() }
         binding.btnToggleGamepad.setOnClickListener { toggleVirtualGamepad() }
+        binding.btnFarm.setOnClickListener { toggleCartSurferFarm() }
 
         wireVirtualGamepad()
 
         // Build overlay content from profile
         buildOverlayContent()
         binding.overlayCard.visibility = View.GONE
+    }
+
+    /** Toggle the Cart Surfer AFK farm loop on/off. */
+    private fun toggleCartSurferFarm() {
+        if (!cursorInjected) {
+            Toast.makeText(this,
+                "Injete o cursor primeiro (entre no jogo)", Toast.LENGTH_SHORT).show()
+            return
+        }
+        binding.webView.evaluateJavascript(CppsLoginHandler.CART_SURFER_FARM_TOGGLE_JS) { result ->
+            runOnUiThread {
+                farmActive = result.contains("started")
+                // Tint button gold when active, grey when stopped
+                val tintColor = if (farmActive) 0xFFFFD700.toInt() else 0xFF888888.toInt()
+                binding.btnFarm.setColorFilter(tintColor, android.graphics.PorterDuff.Mode.SRC_IN)
+                val msg = if (farmActive)
+                    "🤖 AFK Farm iniciado — Cart Surfer"
+                else
+                    "⏹ AFK Farm parado"
+                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     private fun toggleVirtualGamepad() {
