@@ -49,4 +49,13 @@
     <color name="touch">#FFFF6644</color>
     <color name="canvas">#FF44CC88</color>
     <color name="joystick">#FFFF9900</color>
+
+    <!-- Control category colors (used in activity_control_map.xml / activity_analyzer.xml) -->
+    <color name="progress_bg">#FF2A3550</color>
+    <color name="green_movement">#FF00E676</color>
+    <color name="red_action">#FFFF1744</color>
+    <color name="blue_ui">#FF00B4FF</color>
+    <color name="orange_interaction">#FFFF6600</color>
+    <color name="teal_mouse">#FF1DE9B6</color>
+    <color name="card_bg">#FF1E2840</color>
 </resources>
