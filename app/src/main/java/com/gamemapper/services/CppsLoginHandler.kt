@@ -383,35 +383,55 @@ object CppsLoginHandler {
         if (el) el.style.display = show ? 'block' : 'none';
     };
 
-    /* ── gmKey: fire a keyboard event ─────────────────────────────── */
+    /* ── Key code → modern KeyboardEvent properties ────────────────── */
+    var KEY_MAP = {
+        8:  { key:'Backspace',  code:'Backspace'  },
+        9:  { key:'Tab',        code:'Tab'        },
+        13: { key:'Enter',      code:'Enter'      },
+        16: { key:'Shift',      code:'ShiftLeft'  },
+        17: { key:'Control',    code:'ControlLeft'},
+        27: { key:'Escape',     code:'Escape'     },
+        32: { key:' ',          code:'Space'      },
+        37: { key:'ArrowLeft',  code:'ArrowLeft'  },
+        38: { key:'ArrowUp',    code:'ArrowUp'    },
+        39: { key:'ArrowRight', code:'ArrowRight' },
+        40: { key:'ArrowDown',  code:'ArrowDown'  },
+        69: { key:'e',          code:'KeyE'       },
+        73: { key:'i',          code:'KeyI'       },
+        77: { key:'m',          code:'KeyM'       },
+        84: { key:'t',          code:'KeyT'       }
+    };
+
+    /* ── gmKey: fire a keyboard event with full key/code/keyCode ────── */
     window.gmKey = function(keyCode, type) {
         var evtType = type || 'keydown';
-        function makeKey() {
-            return new KeyboardEvent(evtType, {
-                keyCode: keyCode, which: keyCode,
-                bubbles: true, cancelable: true,
-                view: window
-            });
-        }
-        /* Dispatch to document (catches global listeners). */
-        try { document.dispatchEvent(makeKey()); } catch(e) {}
+        var km = KEY_MAP[keyCode] || { key: String.fromCharCode(keyCode), code: 'Key' + String.fromCharCode(keyCode) };
+        var init = {
+            key: km.key, code: km.code,
+            keyCode: keyCode, which: keyCode,
+            bubbles: true, cancelable: true,
+            view: window
+        };
 
-        /* Dispatch to focused element (e.g. chat input). */
-        var focused = document.activeElement;
-        if (focused && focused !== document.body) {
-            try { focused.dispatchEvent(makeKey()); } catch(e) {}
+        function dispatch(target) {
+            try { target.dispatchEvent(new KeyboardEvent(evtType, init)); } catch(e) {}
         }
 
-        /* Dispatch to Ruffle shadow-root canvas. */
+        /* 1. Ruffle shadow-root canvas — highest priority for Flash games. */
         var ruffle = document.querySelector('ruffle-player');
         if (ruffle && ruffle.shadowRoot) {
             var sc = ruffle.shadowRoot.querySelector('canvas');
-            if (sc) { try { sc.dispatchEvent(makeKey()); } catch(e) {} }
+            if (sc) dispatch(sc);
         }
 
-        /* Dispatch to any visible canvas (Phaser / plain HTML5 game). */
+        /* 2. Document (global listeners) and focused element. */
+        dispatch(document);
+        var focused = document.activeElement;
+        if (focused && focused !== document.body) dispatch(focused);
+
+        /* 3. Any visible canvas (Phaser / plain HTML5). */
         document.querySelectorAll('canvas').forEach(function(c) {
-            if (c !== focused) { try { c.dispatchEvent(makeKey()); } catch(e) {} }
+            if (c !== focused) dispatch(c);
         });
     };
 
@@ -446,77 +466,126 @@ object CppsLoginHandler {
         return 'stopped';
     }
 
-    /* ── Trick table: [key1, key2_or_null, label, points] ────────── */
-    /* Rules:
-       - Same trick cannot be repeated back-to-back → we alternate.
-       - Turn (→ or ←) is a valid separator and gives 10 pts.
-       - Flip (↓+Space) gives 100 pts — highest single trick.
-       - Keys must be pressed sequentially, ~260 ms apart (Ruffle timing).  */
+    /* ── Key definitions ────────────────────────────────────────────── */
+    /* Each entry has the modern KeyboardEvent fields that Ruffle uses to
+       convert JS events into ActionScript Key.isDown() calls.
+       keyCode/which are kept for any legacy listeners in the page.     */
+    var KEYS = {
+        SPACE: { key:' ',          code:'Space',      keyCode:32, which:32 },
+        LEFT:  { key:'ArrowLeft',  code:'ArrowLeft',  keyCode:37, which:37 },
+        UP:    { key:'ArrowUp',    code:'ArrowUp',    keyCode:38, which:38 },
+        RIGHT: { key:'ArrowRight', code:'ArrowRight', keyCode:39, which:39 },
+        DOWN:  { key:'ArrowDown',  code:'ArrowDown',  keyCode:40, which:40 }
+    };
+
+    /* ── Find the game keyboard target ──────────────────────────────── */
+    function getTarget() {
+        /* Ruffle shadow-DOM canvas — Flash key events must land here. */
+        var r = document.querySelector('ruffle-player');
+        if (r && r.shadowRoot) {
+            var sc = r.shadowRoot.querySelector('canvas');
+            if (sc) return sc;
+            return r;
+        }
+        /* Phaser / plain HTML5 canvas fallback. */
+        var c = document.querySelector('canvas');
+        return c || document.documentElement;
+    }
+
+    /* ── Send a real keydown + keyup pair to the game ───────────────── */
+    /* This does NOT call any game function — it dispatches standard
+       DOM KeyboardEvent objects with key/code/keyCode so Ruffle's
+       internal listener translates them to ActionScript key events,
+       exactly like a physical keyboard press would.                    */
+    function pressKey(keyDef, afterRelease) {
+        var target = getTarget();
+        var init = {
+            key:        keyDef.key,
+            code:       keyDef.code,
+            keyCode:    keyDef.keyCode,
+            which:      keyDef.which,
+            bubbles:    true,
+            cancelable: true,
+            composed:   true,   /* crosses shadow-DOM boundary */
+            view:       window
+        };
+        /* keydown → game registers "key pressed" */
+        try { target.dispatchEvent(new KeyboardEvent('keydown', init)); } catch(e) {}
+        try { document.dispatchEvent(new KeyboardEvent('keydown', init)); } catch(e) {}
+
+        /* keyup 130 ms later → game registers "key released" */
+        setTimeout(function() {
+            try { target.dispatchEvent(new KeyboardEvent('keyup', init)); } catch(e) {}
+            try { document.dispatchEvent(new KeyboardEvent('keyup', init)); } catch(e) {}
+            if (afterRelease) afterRelease();
+        }, 130);
+    }
+
+    /* ── Trick table ────────────────────────────────────────────────── */
+    /* Points from the image. Rules:
+       • Never repeat the same trick twice in a row (game penalty).
+       • Turn (→ / ←) used as separator; gives 10 pts each.
+       • k2 pressed 270 ms after k1 — Ruffle needs the gap to see them
+         as a two-key combo, not two independent single-key events.     */
     var tricks = [
-        { k1:40, k2:32, label:'Flip',          pts:100 },  // ↓ Space
-        { k1:39, k2:null, label:'Turn →',       pts:10  },  // →
-        { k1:40, k2:40, label:'Run on Tracks',  pts:80  },  // ↓↓
-        { k1:37, k2:null, label:'Turn ←',       pts:10  },  // ←
-        { k1:40, k2:32, label:'Flip',           pts:100 },  // ↓ Space
-        { k1:39, k2:null, label:'Turn →',       pts:10  },  // →
-        { k1:38, k2:38, label:'Handstand',      pts:80  },  // ↑↑
-        { k1:37, k2:null, label:'Turn ←',       pts:10  },  // ←
-        { k1:40, k2:32, label:'Flip',           pts:100 },  // ↓ Space
-        { k1:39, k2:null, label:'Turn →',       pts:10  },  // →
-        { k1:32, k2:39, label:'Spin →',         pts:80  },  // Space →
-        { k1:37, k2:null, label:'Turn ←',       pts:10  },  // ←
+        { k1:KEYS.DOWN,  k2:KEYS.SPACE, label:'Flip',          pts:100 },  // ↓ Space
+        { k1:KEYS.RIGHT, k2:null,        label:'Turn →',   pts:10  },  // →
+        { k1:KEYS.DOWN,  k2:KEYS.DOWN,  label:'Run on Tracks',  pts:80  },  // ↓ ↓
+        { k1:KEYS.LEFT,  k2:null,        label:'Turn ←',   pts:10  },  // ←
+        { k1:KEYS.DOWN,  k2:KEYS.SPACE, label:'Flip',           pts:100 },  // ↓ Space
+        { k1:KEYS.RIGHT, k2:null,        label:'Turn →',   pts:10  },  // →
+        { k1:KEYS.UP,    k2:KEYS.UP,    label:'Handstand',      pts:80  },  // ↑ ↑
+        { k1:KEYS.LEFT,  k2:null,        label:'Turn ←',   pts:10  },  // ←
+        { k1:KEYS.DOWN,  k2:KEYS.SPACE, label:'Flip',           pts:100 },  // ↓ Space
+        { k1:KEYS.RIGHT, k2:null,        label:'Turn →',   pts:10  },  // →
+        { k1:KEYS.SPACE, k2:KEYS.RIGHT, label:'Spin →',    pts:80  },  // Space →
+        { k1:KEYS.LEFT,  k2:null,        label:'Turn ←',   pts:10  },  // ←
     ];
 
-    var step        = 0;
-    var totalPts    = 0;
-    var TRICK_DELAY = 260;   /* ms between k1 and k2 */
-    var LOOP_MS     = 1900;  /* ms between tricks (Cart Surfer section window) */
+    var step     = 0;
+    var totalPts = 0;
+    var GAP_MS   = 270;   /* delay between k1 keyup and k2 keydown */
+    var LOOP_MS  = 1900;  /* interval between tricks (~Cart Surfer window) */
 
-    /* ── HUD indicator ──────────────────────────────────────────────── */
+    /* ── On-screen HUD ──────────────────────────────────────────────── */
     var hud = document.createElement('div');
     hud.id = '__gm_farm_hud';
     hud.style.cssText = [
         'position:fixed',
-        'top:10px',
-        'left:50%',
-        'transform:translateX(-50%)',
-        'background:rgba(0,0,0,0.75)',
+        'top:10px','left:50%','transform:translateX(-50%)',
+        'background:rgba(0,0,0,0.78)',
         'color:#FFD700',
-        'font:bold 13px/1.4 sans-serif',
-        'padding:5px 14px',
+        'font:bold 13px/1.5 sans-serif',
+        'padding:5px 16px',
         'border-radius:20px',
         'border:1.5px solid #FFD700',
         'z-index:2147483647',
         'pointer-events:none',
-        'text-align:center'
+        'text-align:center',
+        'white-space:nowrap'
     ].join(';');
-    hud.innerHTML = '🤖 AFK Farm ON';
+    hud.innerHTML = '\uD83E\uDD16 AFK Farm ON';
     document.body.appendChild(hud);
-
-    /* ── Key press helper ───────────────────────────────────────────── */
-    function pressKey(code) {
-        if (typeof window.gmKey === 'function') {
-            window.gmKey(code, 'keydown');
-            setTimeout(function() { window.gmKey(code, 'keyup'); }, 120);
-        }
-    }
 
     /* ── Main loop ──────────────────────────────────────────────────── */
     window.__gm_farm_interval = setInterval(function() {
         var t = tricks[step % tricks.length];
         step++;
-
-        pressKey(t.k1);
-        if (t.k2 !== null) {
-            setTimeout(function() { pressKey(t.k2); }, TRICK_DELAY);
-        }
-
         totalPts += t.pts;
-        hud.innerHTML = '🤖 ' + t.label + ' <span style="color:#aaffaa">+' + t.pts + '</span>'
-            + '<br><small style="color:#ccc">≈' + totalPts + ' pts esta sessão</small>';
+
+        hud.innerHTML = '\uD83E\uDD16 ' + t.label
+            + ' <span style="color:#aaffaa">+' + t.pts + 'pts</span>'
+            + '<br><small style="color:#bbb">total: ~' + totalPts + ' pts</small>';
+
+        /* Press k1; after its keyup fires, wait GAP_MS then press k2. */
+        pressKey(t.k1, t.k2 ? function() {
+            setTimeout(function() { pressKey(t.k2, null); }, GAP_MS - 130);
+        } : null);
+
     }, LOOP_MS);
 
     return 'started';
 })();
 """.trimIndent()
+}
 }
