@@ -488,13 +488,21 @@ class GameplayActivity : AppCompatActivity(),
 
     // ── Login detection ───────────────────────────────────────────────────────
 
+    private fun domainFromUrl(url: String): String {
+        return try {
+            Uri.parse(url).host ?: url
+        } catch (e: Exception) {
+            url
+        }
+    }
+
     private fun handleLoginDetection(url: String, info: CppsLoginHandler.CppsInfo) {
         if (loginOffered || info.loginType == CppsLoginHandler.LoginType.CANVAS_BASED) {
             handler.postDelayed({ injectVirtualCursor() }, 2000)
             return
         }
         loginOffered = true
-        val domain  = CppsLoginHandler.domainFromUrl(url)
+        val domain  = domainFromUrl(url)
         val userSel = info.usernameSelector ?: "input[name='username']"
         val passSel = info.passwordSelector  ?: "input[type='password']"
         val subSel  = info.submitSelector    ?: "button[type='submit']"
