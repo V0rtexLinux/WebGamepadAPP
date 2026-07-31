@@ -21,6 +21,7 @@ import com.gamemapper.models.ControlType
 import org.json.JSONArray
 import com.gamemapper.services.CppsLoginHandler
 import com.gamemapper.utils.Constants
+import com.gamemapper.utils.CredentialStorage
 import com.gamemapper.utils.ProfileStorage
 import com.gamemapper.views.VirtualGamepadView
 
@@ -240,31 +241,97 @@ class GameplayActivity : AppCompatActivity() {
             info?.submitSelector ?: "button[type='submit']" }
 
         val serverName = info?.displayName ?: "este servidor"
+        val domain     = CredentialStorage.domainFromUrl(gameUrl)
+        val saved      = CredentialStorage.load(this, domain)
 
-        AlertDialog.Builder(this, R.style.Theme_GameMapper_Dialog)
-            .setTitle("Login — $serverName")
-            .setMessage(
-                "Uma tela de login foi detectada.\n\n" +
-                "Quer que o GameMapper preencha suas credenciais automaticamente?"
-            )
-            .setPositiveButton("Sim, inserir dados") { _, _ ->
-                showCredentialInputDialog(userSel, passSel, submitSel, serverName)
+        if (saved != null) {
+            // ── Saved credentials exist — offer to use them directly ─────────
+            AlertDialog.Builder(this, R.style.Theme_GameMapper_Dialog)
+                .setTitle("Login — $serverName")
+                .setMessage(
+                    "Credenciais salvas encontradas para ${saved.username}.\n\n" +
+                    "Entrar automaticamente?"
+                )
+                .setPositiveButton("Sim, entrar") { _, _ ->
+                    injectAndLogin(saved.username, saved.decryptedPassword(),
+                                   userSel, passSel, submitSel)
+                }
+                .setNegativeButton("Usar outra conta") { _, _ ->
+                    showCredentialInputDialog(userSel, passSel, submitSel, serverName,
+                                              domain, prefillSaved = false)
+                }
+                .setNeutralButton("Digitar manualmente") { _, _ ->
+                    handler.postDelayed({ injectVirtualCursor() }, 5000)
+                }
+                .setCancelable(false)
+                .show()
+        } else {
+            // ── No saved credentials — ask whether to auto-fill ─────────────
+            AlertDialog.Builder(this, R.style.Theme_GameMapper_Dialog)
+                .setTitle("Login — $serverName")
+                .setMessage(
+                    "Uma tela de login foi detectada.\n\n" +
+                    "Quer que o GameMapper preencha suas credenciais automaticamente?"
+                )
+                .setPositiveButton("Sim, inserir dados") { _, _ ->
+                    showCredentialInputDialog(userSel, passSel, submitSel, serverName,
+                                              domain, prefillSaved = false)
+                }
+                .setNegativeButton("Não, vou digitar") { _, _ ->
+                    handler.postDelayed({ injectVirtualCursor() }, 5000)
+                }
+                .setCancelable(false)
+                .show()
+        }
+    }
+
+    /** Inject credentials directly (called when saved creds are confirmed). */
+    private fun injectAndLogin(
+        username: String, password: String,
+        userSel: String, passSel: String, submitSel: String
+    ) {
+        val js = CppsLoginHandler.buildInjectCredentialsJS(
+            username, password, userSel, passSel, submitSel
+        )
+        binding.webView.evaluateJavascript(js) { result ->
+            runOnUiThread {
+                if (result.contains("\"injected\":true")) {
+                    Toast.makeText(this, "Login enviado automaticamente!", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "Login enviado…", Toast.LENGTH_SHORT).show()
+                }
+                handler.postDelayed({ injectVirtualCursor() }, 4000)
             }
-            .setNegativeButton("Não, vou digitar") { _, _ ->
-                // User will type manually; inject cursor after they log in
-                handler.postDelayed({ injectVirtualCursor() }, 5000)
-            }
-            .setCancelable(false)
-            .show()
+        }
     }
 
     private fun showCredentialInputDialog(
-        userSel: String, passSel: String, submitSel: String, serverName: String
+        userSel: String, passSel: String, submitSel: String,
+        serverName: String, domain: String, prefillSaved: Boolean
     ) {
         val inflater = layoutInflater
-        val view = inflater.inflate(R.layout.dialog_login_input, null)
-        val etUser = view.findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.etUsername)
-        val etPass = view.findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.etPassword)
+        val view     = inflater.inflate(R.layout.dialog_login_input, null)
+
+        val etUser  = view.findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.etUsername)
+        val etPass  = view.findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.etPassword)
+        val cbSave  = view.findViewById<android.widget.CheckBox>(R.id.cbRememberCredentials)
+        val banner  = view.findViewById<android.view.View>(R.id.layoutSavedBanner)
+        val tvForget = view.findViewById<android.widget.TextView>(R.id.tvForgetCredentials)
+
+        // Pre-fill if we have saved credentials and caller allows it
+        val saved = if (prefillSaved) CredentialStorage.load(this, domain) else null
+        if (saved != null) {
+            etUser?.setText(saved.username)
+            etPass?.setText(saved.decryptedPassword())
+            banner?.visibility = android.view.View.VISIBLE
+            tvForget?.setOnClickListener {
+                CredentialStorage.delete(this, domain)
+                etUser?.text?.clear()
+                etPass?.text?.clear()
+                banner?.visibility = android.view.View.GONE
+                Toast.makeText(this, "Credenciais removidas", Toast.LENGTH_SHORT).show()
+            }
+        }
 
         AlertDialog.Builder(this, R.style.Theme_GameMapper_Dialog)
             .setTitle("Credenciais — $serverName")
@@ -273,18 +340,14 @@ class GameplayActivity : AppCompatActivity() {
                 val username = etUser?.text?.toString()?.trim() ?: ""
                 val password = etPass?.text?.toString() ?: ""
                 if (username.isNotEmpty() && password.isNotEmpty()) {
-                    val js = CppsLoginHandler.buildInjectCredentialsJS(
-                        username, password, userSel, passSel, submitSel
-                    )
-                    binding.webView.evaluateJavascript(js) { result ->
-                        if (result.contains("\"injected\":true")) {
-                            runOnUiThread {
-                                Toast.makeText(this, "Login enviado…", Toast.LENGTH_SHORT).show()
-                                // Inject cursor after redirect to game
-                                handler.postDelayed({ injectVirtualCursor() }, 4000)
-                            }
-                        }
+                    // Save credentials if checkbox is checked
+                    if (cbSave?.isChecked == true) {
+                        CredentialStorage.save(this, domain, username, password)
+                        Toast.makeText(this, "Senha salva para $domain", Toast.LENGTH_SHORT).show()
                     }
+                    injectAndLogin(username, password, userSel, passSel, submitSel)
+                } else {
+                    Toast.makeText(this, "Preencha usuário e senha", Toast.LENGTH_SHORT).show()
                 }
             }
             .setNegativeButton("Cancelar", null)

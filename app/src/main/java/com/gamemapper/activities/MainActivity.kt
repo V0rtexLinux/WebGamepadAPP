@@ -10,6 +10,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import com.gamemapper.R
 import com.gamemapper.adapters.ProfileAdapter
 import com.gamemapper.databinding.ActivityMainBinding
+import com.gamemapper.services.CppsLoginHandler
 import com.gamemapper.utils.Constants
 import com.gamemapper.utils.ProfileStorage
 
@@ -60,7 +61,7 @@ class MainActivity : AppCompatActivity() {
             } else false
         }
 
-        // Quick fill buttons for popular CPPS games
+        // Quick-fill buttons for popular CPPS games
         binding.btnCpJourney.setOnClickListener {
             binding.etUrl.setText("https://play.cpjourney.net")
         }
@@ -71,7 +72,8 @@ class MainActivity : AppCompatActivity() {
             binding.etUrl.setText("https://icer.ink")
         }
         binding.btnCpLegacy.setOnClickListener {
-            binding.etUrl.setText("https://cplegacy.com")
+            // Use the play subdomain — it loads the game directly
+            binding.etUrl.setText("https://play.cplegacy.com")
         }
     }
 
@@ -91,6 +93,18 @@ class MainActivity : AppCompatActivity() {
         }
         val url = if (!rawUrl.startsWith("http")) "https://$rawUrl" else rawUrl
 
+        // ── CPPS-only validation ─────────────────────────────────────────────
+        if (!CppsLoginHandler.isCpps(url)) {
+            Toast.makeText(
+                this,
+                "Este app suporta apenas servidores CPPS de Club Penguin.\n" +
+                    "Experimente: play.cpjourney.net, cpps.app, play.cplegacy.com",
+                Toast.LENGTH_LONG
+            ).show()
+            binding.etUrl.error = "URL deve ser de um servidor CPPS reconhecido"
+            return
+        }
+
         getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)
             .edit().putString(Constants.KEY_LAST_URL, url).apply()
 
@@ -104,6 +118,6 @@ class MainActivity : AppCompatActivity() {
         val profiles = ProfileStorage.loadProfiles(this)
         profileAdapter.submitList(profiles)
         binding.tvEmptyState.visibility = if (profiles.isEmpty()) View.VISIBLE else View.GONE
-        binding.rvProfiles.visibility = if (profiles.isEmpty()) View.GONE else View.VISIBLE
+        binding.rvProfiles.visibility   = if (profiles.isEmpty()) View.GONE   else View.VISIBLE
     }
 }

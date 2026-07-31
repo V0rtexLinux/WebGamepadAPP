@@ -4,6 +4,8 @@ object Constants {
     const val PREFS_NAME = "gamemapper_prefs"
     const val KEY_PROFILES = "saved_profiles"
     const val KEY_LAST_URL = "last_url"
+    const val KEY_CREDENTIALS = "saved_credentials"   // ← CredentialStorage key
+
     const val EXTRA_GAME_URL = "extra_game_url"
     const val EXTRA_PROFILE_ID = "extra_profile_id"
     const val EXTRA_ANALYSIS_MODE = "extra_analysis_mode"
@@ -15,9 +17,9 @@ object Constants {
 
     // Known CPPS quick-fill URLs
     val CPPS_SHORTCUTS = listOf(
-        "CPJourney"     to "https://play.cpjourney.net",
-        "CPPS.app"      to "https://cpps.app/auth/login",
-        "Icer"          to "https://icer.ink",
-        "CP Legacy"     to "https://cplegacy.com"
+        "CPJourney"  to "https://play.cpjourney.net",
+        "CPPS.app"   to "https://cpps.app/auth/login",
+        "Icer"       to "https://icer.ink",
+        "CP Legacy"  to "https://play.cplegacy.com"
     )
 }

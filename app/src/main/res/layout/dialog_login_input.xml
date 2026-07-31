@@ -7,6 +7,40 @@
     android:orientation="vertical"
     android:padding="20dp">
 
+    <!-- Saved credential banner (shown only when pre-filling) -->
+    <LinearLayout
+        android:id="@+id/layoutSavedBanner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:background="#1A4CAF50"
+        android:padding="10dp"
+        android:layout_marginBottom="12dp"
+        android:gravity="center_vertical"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="✓ Credenciais salvas carregadas"
+            android:textColor="#4CAF50"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tvForgetCredentials"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Esquecer"
+            android:textColor="#FF7043"
+            android:textSize="11sp"
+            android:padding="4dp"
+            android:background="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true" />
+    </LinearLayout>
+
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
@@ -72,12 +106,16 @@
 
     </com.google.android.material.textfield.TextInputLayout>
 
-    <TextView
-        android:layout_width="wrap_content"
+    <!-- Remember password checkbox -->
+    <CheckBox
+        android:id="@+id/cbRememberCredentials"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:text="⚠️ Suas credenciais são usadas apenas para preencher o formulário de login do jogo. O GameMapper não armazena senhas."
-        android:textColor="@color/on_surface_low"
-        android:textSize="11sp" />
+        android:layout_marginTop="8dp"
+        android:text="Lembrar senha neste servidor"
+        android:textColor="@color/on_surface_medium"
+        android:textSize="13sp"
+        android:checked="true"
+        android:buttonTint="@color/accent" />
 
 </LinearLayout>
