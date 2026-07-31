@@ -780,56 +780,50 @@ object CppsLoginHandler {
     hud.innerHTML = '\uD83E\uDD16 AFK Farm ON' + (curveDetectionEnabled ? ' <small style="color:#8fd">(curvas: reativo)</small>' : ' <small style="color:#f88">(curvas: timer fixo)</small>');
     document.body.appendChild(hud);
 
-    /* ── Reactive curve watcher ────────────────────────────────────── */
-/* Runs independently of the trick loop's timing so a turn fires when a sign is actually seen close/large on screen, not on a guessed clock. The sign scrolls by 4–5 times before the real curve (per your screenshots), so this counts distinct appearances and only fires on the last one: it waits for the sign to grow past gmSetSignTriggerSize() (close = about to reach the bend), but skips the first few passes. It fires once, then requires the sign to disappear from view before it can fire again for the next curve. */
-var signArmed = true /* true = ready to fire on the next big-enough sign */
-var noSignStreak = 0
-var signPassCount = 0 /* distinct sign appearances since last turn */
-val curveWatcherHandler = Handler(Looper.getMainLooper())
-val curveWatcherRunnable = object : Runnable {
-    override fun run() {
-        val r = scanSignBand()
-        if (r == null) {
-            curveWatcherHandler.postDelayed(this, 90)
-            return /* canvas hiccup this tick — just skip */
-        }
-        if (!r.found) {
-            noSignStreak++
-            if (noSignStreak >= 3) {
-                signArmed = true
-                signPassCount = 0 /* sign has cleared — ready for the next one */
+    /* ── Reactive curve watcher ──────────────────────────────────────
+       Runs independently of the trick loop's timing so a turn fires
+       when a sign is actually seen close/large on screen, not on a
+       guessed clock. The sign scrolls by several times before the real
+       curve, so this counts distinct appearances and only fires on the
+       last one: it waits for the sign to grow past
+       gmSetSignTriggerSize() (close = about to reach the bend), but
+       skips the first few passes. It fires once, then requires the
+       sign to disappear from view before it can fire again for the
+       next curve.                                                     */
+    var signArmed    = true;  /* true = ready to fire on the next big-enough sign */
+    var noSignStreak  = 0;
+    var signPassCount = 0;    /* distinct sign appearances since last turn */
+
+    if (curveDetectionEnabled) {
+        window.__gm_curve_watcher = setInterval(function() {
+            var r = scanSignBand();
+            if (!r) return;               /* canvas hiccup this tick — just skip */
+
+            if (!r.found) {
+                noSignStreak++;
+                if (noSignStreak >= 3) {
+                    signArmed = true;
+                    signPassCount = 0;     /* sign has cleared — ready for the next one */
+                }
+                return;
             }
-            curveWatcherHandler.postDelayed(this, 90)
-            return
-        }
-        noSignStreak = 0
-        if (!signArmed) {
-            curveWatcherHandler.postDelayed(this, 90)
-            return /* already turned for this sign */
-        }
-        if (r.dir == null) {
-            curveWatcherHandler.postDelayed(this, 90)
-            return /* sign visible but shape unclear yet */
-        }
-        if (r.peakFrac < window.__gm_sign_trigger_size) {
-            curveWatcherHandler.postDelayed(this, 90)
-            return /* still too small/far */
-        }
-        signPassCount++
-        if (signPassCount < 4) {
-            curveWatcherHandler.postDelayed(this, 90)
-            return /* skip first 4 appearances, fire on the 5th (the real curve sign) */
-        }
-        signArmed = false
-        pressKey(if (r.dir == "LEFT") KEYS.LEFT else KEYS.RIGHT, null)
-        totalPts += 10
-        hud.innerHTML = "\uD83E\uDD16 Turn " + (if (r.dir == "LEFT") "←" else "→") + " <span style=\"color:#aaffaa\">+10pts</span>" + "<br><small style=\"color:#bbb\">total: ~" + totalPts + " pts</small>"
-        curveWatcherHandler.postDelayed(this, 90)
+            noSignStreak = 0;
+
+            if (!signArmed) return;                /* already turned for this sign */
+            if (r.dir === null) return;             /* sign visible but shape unclear yet */
+            if (r.peakFrac < window.__gm_sign_trigger_size) return; /* still too small/far */
+
+            signPassCount++;
+            if (signPassCount < 4) return;          /* skip early passes, fire on the real curve sign */
+
+            signArmed = false;
+            pressKey(r.dir === 'LEFT' ? KEYS.LEFT : KEYS.RIGHT, null);
+            totalPts += 10;
+            hud.innerHTML = '\uD83E\uDD16 Turn ' + (r.dir === 'LEFT' ? '←' : '→')
+                + ' <span style="color:#aaffaa">+10pts</span>'
+                + '<br><small style="color:#bbb">total: ~' + totalPts + ' pts</small>';
+        }, 90);
     }
-}
-if (curveDetectionEnabled) {
-    curveWatcherHandler.postDelayed(curveWatcherRunnable, 90)
-}
 
     /* ── Main trick loop ───────────────────────────────────────────── */
     window.__gm_farm_interval = setInterval(function() {
