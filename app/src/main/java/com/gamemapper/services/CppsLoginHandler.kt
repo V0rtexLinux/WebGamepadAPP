@@ -588,4 +588,3 @@ object CppsLoginHandler {
 })();
 """.trimIndent()
 }
-}
