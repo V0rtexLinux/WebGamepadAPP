@@ -468,16 +468,19 @@ object FarmScripts {
   var CRASH_TURN          = 6;
   var MAX_LIVES           = 1;
   var RESPAWN_WAIT        = 2800;
-  var LOOP_RATE           = 50;
+  var LOOP_RATE           = 80;     /* ms — main loop tick (light) */
+  var DETECT_INTERVAL_MS  = 140;    /* only run heavy template match this often */
 
-  /* Sign-detection tuning */
-  var MATCH_THRESHOLD     = 0.55;
-  var TURN_AT_REMAINING   = 2;
-  var SIGN_MIN_SPACING_PX = 60;
+  /* Sign-detection tuning — HEAVILY optimised to avoid freezing the WebView */
+  var MATCH_THRESHOLD     = 0.50;   /* NCC score above this => sign present */
+  var TURN_AT_REMAINING   = 2;      /* press turn key when this many signs remain */
+  var SIGN_MIN_SPACING_PX = 50;     /* px (downscaled) to count as a NEW sign */
   var SIGN_COOLDOWN_MS    = 250;
   var MAX_QUEUE           = 8;
-  var DOWNSCALE           = 2;
-  var SEARCH_STEP         = 2;
+  var DOWNSCALE           = 4;      /* bigger downscale = far fewer pixels to scan */
+  var COARSE_STEP         = 8;      /* first-pass scan step (fast, covers whole zone) */
+  var FINE_STEP           = 2;      /* refinement scan step around best candidate */
+  var FINE_MARGIN         = 12;     /* refinement half-window in px */
 
   var RIGHT_ZONE = { x0:0.52, x1:0.78, y0:0.18, y1:0.80 };
   var LEFT_ZONE  = { x0:0.22, x1:0.48, y0:0.18, y1:0.80 };
@@ -605,11 +608,14 @@ object FarmScripts {
     lastTrickTime = Date.now();
   }
 
-  /* -- Image capture + grayscale (downscaled) -- */
+  /* -- Image capture + grayscale (downscaled) + integral image (SAT) -- */
   var grabCanvas = document.createElement('canvas');
   var grabCtx = grabCanvas.getContext('2d');
-  var grabGray = null, grabW = 0, grabH = 0;
+  var grabGray = null, grabSAT = null, grabW = 0, grabH = 0;
 
+  /* SAT has (sw+1)*(sh+1) entries; sat(x,y) = sum of gray[0..x-1, 0..y-1].
+     Rect sum from (x0,y0) inclusive to (x1,y1) exclusive:
+       = sat(x1,y1) - sat(x0,y1) - sat(x1,y0) + sat(x0,y0) */
   function captureGrayscale() {
     if (!gameCanvas) return false;
     var sw = Math.floor(gameCanvas.width / DOWNSCALE);
@@ -618,6 +624,7 @@ object FarmScripts {
     if (grabCanvas.width !== sw || grabCanvas.height !== sh) {
       grabCanvas.width = sw; grabCanvas.height = sh;
       grabGray = new Float32Array(sw * sh);
+      grabSAT  = new Float32Array((sw + 1) * (sh + 1));
       grabW = sw; grabH = sh;
     }
     try {
@@ -626,7 +633,26 @@ object FarmScripts {
     var d = grabCtx.getImageData(0, 0, sw, sh).data;
     for (var i=0, p=0; i<d.length; i+=4, p++)
       grabGray[p] = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+
+    /* build SAT in-place (row-major, indexed [y*(sw+1)+x]) */
+    var sat = grabSAT, W = sw + 1;
+    for (var y = 0; y < sh; y++) {
+      var rowSum = 0;
+      var gy = y * sw;
+      for (var x = 0; x < sw; x++) {
+        rowSum += grabGray[gy + x];
+        sat[(y + 1) * W + (x + 1)] = sat[y * W + (x + 1)] + rowSum;
+      }
+    }
     return true;
+  }
+
+  /* O(1) sum of a rectangular region of grabGray via SAT.
+     x0,y0 = top-left inclusive; x1,y1 = bottom-right exclusive. */
+  function rectSum(x0, y0, x1, y1) {
+    var W = grabW + 1;
+    return grabSAT[y1 * W + x1] - grabSAT[y0 * W + x1]
+         - grabSAT[y1 * W + x0] + grabSAT[y0 * W + x0];
   }
 
   /* -- Template matching -- */
@@ -659,37 +685,63 @@ object FarmScripts {
     if (!tmplLeftScaled  && tmplLeft)  tmplLeftScaled  = scaleTemplate(tmplLeft);
   }
 
+  /* Full NCC at a single (x,y) offset using precomputed template stats.
+     sMean is passed in (computed via SAT in O(1)). */
+  function nccAt(tmpl, x, y, sMean) {
+    var tw = tmpl.w, th = tmpl.h, tg = tmpl.gray, tMean = tmpl.mean, tDenom = tmpl.denom;
+    var cross = 0, sDenom = 0;
+    for (var ty = 0; ty < th; ty++) {
+      var srow = (y + ty) * grabW + x;
+      var trow = ty * tw;
+      for (var tx = 0; tx < tw; tx++) {
+        var s = grabGray[srow + tx] - sMean;
+        var tt = tg[trow + tx] - tMean;
+        cross += s * tt; sDenom += s * s;
+      }
+    }
+    sDenom = Math.sqrt(sDenom);
+    if (sDenom < 1e-6 || tDenom < 1e-6) return 0;
+    return cross / (sDenom * tDenom);
+  }
+
+  /* Coarse-to-fine zone scan.
+     Pass 1: coarse grid (COARSE_STEP) using SAT for O(1) mean → only compute
+             the expensive cross-correlation denominator at each coarse point.
+     Pass 2: fine grid (FINE_STEP) inside a small window around the best
+             coarse candidate. */
   function matchZone(tmpl, zone) {
-    if (!tmpl || !grabGray) return { score:0, x:0, y:0 };
+    if (!tmpl || !grabGray) return { score: 0, x: 0, y: 0 };
     var x0 = Math.floor(grabW * zone.x0), x1 = Math.floor(grabW * zone.x1);
     var y0 = Math.floor(grabH * zone.y0), y1 = Math.floor(grabH * zone.y1);
-    var tw = tmpl.w, th = tmpl.h, tg = tmpl.gray, tMean = tmpl.mean, tDenom = tmpl.denom;
-    if (tDenom < 1e-6) return { score:0, x:0, y:0 };
+    var tw = tmpl.w, th = tmpl.h, nPx = tw * th;
+    if (tDenom_is_zero(tmpl)) return { score: 0, x: 0, y: 0 };
+
+    /* ── Pass 1: coarse scan (SAT mean, full NCC only at grid points) ── */
     var bestScore = -Infinity, bestX = 0, bestY = 0;
-    for (var y=y0; y+th <= y1; y += SEARCH_STEP) {
-      for (var x=x0; x+tw <= x1; x += SEARCH_STEP) {
-        var sMean = 0;
-        for (var ty=0; ty<th; ty++) {
-          var srow = (y+ty)*grabW + x;
-          for (var tx=0; tx<tw; tx++) sMean += grabGray[srow + tx];
-        }
-        sMean /= tg.length;
-        var cross = 0, sDenom = 0;
-        for (var ty2=0; ty2<th; ty2++) {
-          var srow2 = (y+ty2)*grabW + x;
-          for (var tx2=0; tx2<tw; tx2++) {
-            var s = grabGray[srow2 + tx2] - sMean;
-            var tt = tg[ty2*tw + tx2] - tMean;
-            cross += s*tt; sDenom += s*s;
-          }
-        }
-        sDenom = Math.sqrt(sDenom);
-        var score = (sDenom < 1e-6) ? 0 : cross / (sDenom * tDenom);
+    for (var y = y0; y + th <= y1; y += COARSE_STEP) {
+      for (var x = x0; x + tw <= x1; x += COARSE_STEP) {
+        var sMean = rectSum(x, y, x + tw, y + th) / nPx;
+        var score = nccAt(tmpl, x, y, sMean);
         if (score > bestScore) { bestScore = score; bestX = x; bestY = y; }
+      }
+    }
+
+    /* ── Pass 2: fine refinement around best coarse candidate ── */
+    var rx0 = Math.max(x0, bestX - FINE_MARGIN);
+    var ry0 = Math.max(y0, bestY - FINE_MARGIN);
+    var rx1 = Math.min(x1 - tw, bestX + FINE_MARGIN);
+    var ry1 = Math.min(y1 - th, bestY + FINE_MARGIN);
+    for (var fy = ry0; fy <= ry1; fy += FINE_STEP) {
+      for (var fx = rx0; fx <= rx1; fx += FINE_STEP) {
+        var sm = rectSum(fx, fy, fx + tw, fy + th) / nPx;
+        var sc = nccAt(tmpl, fx, fy, sm);
+        if (sc > bestScore) { bestScore = sc; bestX = fx; bestY = fy; }
       }
     }
     return { score: bestScore, x: bestX, y: bestY };
   }
+
+  function tDenom_is_zero(tmpl) { return tmpl.denom < 1e-6; }
 
   /* -- Sign tracking -- */
   function trackSigns(queue, match, now) {
@@ -748,39 +800,49 @@ object FarmScripts {
     }, TURN_HOLD_MS + 450);
   }
 
-  /* -- Main loop -- */
+  /* -- Main loop (throttled: heavy detection runs at most every DETECT_INTERVAL_MS) -- */
+  var lastDetectTs = 0;
   function loop() {
     if (!window.__csSignFarmRunning) { clearInterval(loopId); return; }
-    if (state === STATE.DONE || state === STATE.CRASHED || state === STATE.TURNING) return;
+    if (state === STATE.DONE || state === STATE.CRASHED || state === STATE.TURNING) {
+      /* keep trick timer honest while waiting */
+      if (state === STATE.PLAYING && Date.now() - lastTrickTime >= TRICK_INTERVAL) doTrick();
+      return;
+    }
 
     if (state === STATE.IDLE) {
       if (!ensureGL() || !templatesReady) return;
       ensureScaledTemplates();
       state = STATE.PLAYING; window.__csSignFarmStats.state = STATE.PLAYING;
       lastTrickTime = Date.now() + 1800;
+      lastDetectTs = 0;
       return;
     }
 
     if (state === STATE.PLAYING) {
-      if (captureGrayscale()) {
-        var now = Date.now();
-        var mR = matchZone(tmplRightScaled, RIGHT_ZONE);
-        var mL = matchZone(tmplLeftScaled,  LEFT_ZONE);
-        trackSigns(rightSigns, mR, now);
-        trackSigns(leftSigns,  mL, now);
-        window.__csSignFarmStats.rightRemaining = rightSigns.length;
-        window.__csSignFarmStats.leftRemaining  = leftSigns.length;
+      var now = Date.now();
+      var doDetect = (now - lastDetectTs) >= DETECT_INTERVAL_MS;
+      if (doDetect) {
+        lastDetectTs = now;
+        if (captureGrayscale()) {
+          var mR = matchZone(tmplRightScaled, RIGHT_ZONE);
+          var mL = matchZone(tmplLeftScaled,  LEFT_ZONE);
+          trackSigns(rightSigns, mR, now);
+          trackSigns(leftSigns,  mL, now);
+          window.__csSignFarmStats.rightRemaining = rightSigns.length;
+          window.__csSignFarmStats.leftRemaining  = leftSigns.length;
 
-        if (!inTurnBlock) {
-          if (rightSigns.length >= TURN_AT_REMAINING && rightSigns.length > leftSigns.length) {
-            executeTurn('LEFT'); return;
-          }
-          if (leftSigns.length  >= TURN_AT_REMAINING && leftSigns.length  > rightSigns.length) {
-            executeTurn('RIGHT'); return;
+          if (!inTurnBlock) {
+            if (rightSigns.length >= TURN_AT_REMAINING && rightSigns.length > leftSigns.length) {
+              executeTurn('LEFT'); return;
+            }
+            if (leftSigns.length  >= TURN_AT_REMAINING && leftSigns.length  > rightSigns.length) {
+              executeTurn('RIGHT'); return;
+            }
           }
         }
       }
-      if (Date.now() - lastTrickTime >= TRICK_INTERVAL) doTrick();
+      if (now - lastTrickTime >= TRICK_INTERVAL) doTrick();
     }
   }
   loopId = setInterval(loop, LOOP_RATE);
