@@ -213,7 +213,7 @@ class GameplayActivity : AppCompatActivity(),
     }
 
     private fun setupFarmManager() {
-        farmManager = CoinFarmManager(binding.webView, this)
+        farmManager = CoinFarmManager(binding.webView, this, this)
         if (autoFarmEnabled) {
             farmManager.start(autoFarm = true)
         }

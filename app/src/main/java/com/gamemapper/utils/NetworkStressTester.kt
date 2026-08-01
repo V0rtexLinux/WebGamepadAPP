@@ -1087,7 +1087,8 @@ object NetworkStressTester {
                 }
                 val firedAt = now()
                 val responses = mutableListOf<Pair<String, String>>()
-                val channel = WsChannel(ROUTINE_CONCURRENT_STRESS, cfg.timeoutPerRequestMs, onResponse = {}) {}
+                val records = ConcurrentLinkedQueue<TimingRecord>()
+                val channel = WsChannel(ROUTINE_CONCURRENT_STRESS, cfg.timeoutPerRequestMs, onResponse = {}, records)
                 val ws = client().newWebSocket(buildWsRequest(), channel)
                 channel.bind(ws)
                 try {
