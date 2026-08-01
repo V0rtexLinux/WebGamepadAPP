@@ -461,7 +461,7 @@ object FarmScripts {
 
   /* -- Tuning constants -- */
   var TRICK_INTERVAL      = 1700;
-  var TURN_HOLD_MS        = 340;
+  var TURN_HOLD_MS        = 450;   /* hold the arrow key for 450ms (safe: 450-500ms range) */
   var KEY_TAP_MS          = 85;
   var SEQ_DELAY_MS        = 90;
   var COOLDOWN_AFTER_TURN = 600;
@@ -473,7 +473,6 @@ object FarmScripts {
 
   /* Sign-detection tuning — HEAVILY optimised to avoid freezing the WebView */
   var MATCH_THRESHOLD     = 0.50;   /* NCC score above this => sign present */
-  var TURN_AT_REMAINING   = 2;      /* press turn key when this many signs remain */
   var SIGN_MIN_SPACING_PX = 50;     /* px (downscaled) to count as a NEW sign */
   var SIGN_COOLDOWN_MS    = 250;
   var MAX_QUEUE           = 8;
@@ -481,6 +480,15 @@ object FarmScripts {
   var COARSE_STEP         = 8;      /* first-pass scan step (fast, covers whole zone) */
   var FINE_STEP           = 2;      /* refinement scan step around best candidate */
   var FINE_MARGIN         = 12;     /* refinement half-window in px */
+
+  /* Turn trigger: wait for the LAST sign to reach a low Y (near the cart)
+     before turning. The game shows 4-6 signs before a curve; we count them
+     all, and only turn when the count has stabilized (no new sign for a
+     while) AND a sign is in the trigger band at the bottom of the screen
+     (i.e. it's the final one and the curve is imminent). */
+  var MIN_SIGNS_BEFORE_TURN = 1;    /* min signs seen before allowing a turn (keep = 1) */
+  var TRIGGER_BAND_TOP    = 0.58;   /* top of the trigger band (fraction of grab height) */
+  var TRIGGER_BAND_BOT    = 0.82;   /* bottom of the trigger band */
 
   var RIGHT_ZONE = { x0:0.52, x1:0.78, y0:0.18, y1:0.80 };
   var LEFT_ZONE  = { x0:0.22, x1:0.48, y0:0.18, y1:0.80 };
@@ -509,6 +517,7 @@ object FarmScripts {
     lastTrick:'', lastTurnDir:'',
     rightSignsSeen:0, leftSignsSeen:0,
     rightRemaining:0, leftRemaining:0,
+    dbgRightY:-1, dbgTrigY:-1, dbgGrabH:0,
     startTs:Date.now()
   };
 
@@ -709,10 +718,14 @@ object FarmScripts {
              the expensive cross-correlation denominator at each coarse point.
      Pass 2: fine grid (FINE_STEP) inside a small window around the best
              coarse candidate. */
-  function matchZone(tmpl, zone) {
+  function matchZone(tmpl, zone, y0f, y1f) {
     if (!tmpl || !grabGray) return { score: 0, x: 0, y: 0 };
     var x0 = Math.floor(grabW * zone.x0), x1 = Math.floor(grabW * zone.x1);
-    var y0 = Math.floor(grabH * zone.y0), y1 = Math.floor(grabH * zone.y1);
+    /* Allow caller to restrict the vertical scan range (fractions of grabH).
+       Default: use the full zone height. */
+    var ya = (y0f != null) ? y0f : zone.y0;
+    var yb = (y1f != null) ? y1f : zone.y1;
+    var y0 = Math.floor(grabH * ya), y1 = Math.floor(grabH * yb);
     var tw = tmpl.w, th = tmpl.h, nPx = tw * th;
     if (tDenom_is_zero(tmpl)) return { score: 0, x: 0, y: 0 };
 
@@ -743,28 +756,78 @@ object FarmScripts {
 
   function tDenom_is_zero(tmpl) { return tmpl.denom < 1e-6; }
 
-  /* -- Sign tracking -- */
-  function trackSigns(queue, match, now) {
+  /* -- Sign tracking: two-window approach with count-stabilization --
+     PROBLEM: matchZone returns only the SINGLE best NCC match in whatever
+     region we scan. When multiple signs overlap at the same X (as they
+     scroll down one after another), the global-best peak stays anchored at
+     a fixed Y — it does NOT follow the lowest/last sign. So we can't use
+     a single global match to know when the LAST sign is near the cart.
+
+     SOLUTION: scan TWO separate vertical windows per wall each frame:
+       1. COUNT WINDOW (upper, y ≈ 0.18→0.52): detects signs as they ENTER
+          at the top of the screen. Each newly-entered sign increments the
+          running total. This tells us "how many signs have we passed".
+       2. TRIGGER BAND (lower, y ≈ TRIGGER_BAND_TOP→TRIGGER_BAND_BOT):
+          detects only signs that have scrolled DOWN to near the cart.
+
+     TURN CONDITION: We turn when a sign is in the trigger band AND the
+     count has STABILIZED (no new sign detected for COUNT_STABLE_MS). This
+     ensures we've seen ALL the signs for this curve, and the one in the
+     trigger band is the LAST one. This prevents turning on the first sign. */
+  var COUNT_WIN_TOP = 0.18, COUNT_WIN_BOT = 0.52;
+  var COUNT_STABLE_MS = 1200;  /* no new sign for this long → count is stable */
+  var rightTotalSeen = 0, leftTotalSeen = 0;
+  /* For the count window: track the last detected sign's Y + timestamp so
+     we can tell when a NEW sign has entered (Y jump = new sign at top). */
+  var rightCountLastY = -999, leftCountLastY = -999;
+  var rightCountLastTs = 0,  leftCountLastTs  = 0;
+  /* Timestamp of the last time the count increased (a new sign was counted) */
+  var rightCountChangedTs = 0, leftCountChangedTs = 0;
+  /* For the trigger band: just a boolean — is a sign currently in the band? */
+  var rightInBand = false, leftInBand = false;
+  /* Legacy compat (kept for stats) */
+  var rightCurrentY = -1, leftCurrentY = -1;
+
+  function trackCount(dir, match, now) {
+    /* Track signs entering the upper count window. A sign is NEW if:
+       - there was a time gap (> SIGN_COOLDOWN_MS) since last detection, OR
+       - the detected Y jumped by > SIGN_MIN_SPACING_PX (a fresh sign
+         appeared at the top while the previous one scrolled down). */
     if (match.score < MATCH_THRESHOLD) return;
-    for (var i = queue.length - 1; i >= 0; i--) {
-      if (now - queue[i].t > SIGN_COOLDOWN_MS * 3) queue.splice(i, 1);
+    var lastY, lastTs, total, changedTs;
+    if (dir === 'RIGHT') {
+      lastY = rightCountLastY; lastTs = rightCountLastTs;
+      total = rightTotalSeen; changedTs = rightCountChangedTs;
+    } else {
+      lastY = leftCountLastY;  lastTs = leftCountLastTs;
+      total = leftTotalSeen;   changedTs = leftCountChangedTs;
     }
-    var isNew = true;
-    for (var j=0; j<queue.length; j++) {
-      if (Math.abs(queue[j].x - match.x) < SIGN_MIN_SPACING_PX &&
-          Math.abs(queue[j].y - match.y) < SIGN_MIN_SPACING_PX) {
-        queue[j].x = match.x; queue[j].y = match.y; queue[j].t = now;
-        isNew = false; break;
-      }
-    }
+    var curY = match.y;
+    var gap = now - lastTs;
+    var yDiff = curY - lastY;
+    var isNew = (gap > SIGN_COOLDOWN_MS) ||
+                (lastY > -900 && Math.abs(yDiff) > SIGN_MIN_SPACING_PX);
     if (isNew) {
-      queue.push({ x: match.x, y: match.y, t: now });
-      if (queue.length > MAX_QUEUE) queue.shift();
+      total++;
+      changedTs = now;
     }
-    var maxY = grabH * 0.80;
-    for (var k = queue.length - 1; k >= 0; k--) {
-      if (queue[k].y > maxY + thPad) queue.splice(k, 1);
+    if (dir === 'RIGHT') {
+      rightTotalSeen = total; rightCountLastY = curY; rightCountLastTs = now;
+      rightCountChangedTs = changedTs;
+    } else {
+      leftTotalSeen = total; leftCountLastY = curY; leftCountLastTs = now;
+      leftCountChangedTs = changedTs;
     }
+  }
+
+  function resetSignCounters() {
+    rightTotalSeen = 0; leftTotalSeen = 0;
+    rightCountLastY = -999; leftCountLastY = -999;
+    rightCountLastTs = 0; leftCountLastTs = 0;
+    rightCountChangedTs = 0; leftCountChangedTs = 0;
+    rightInBand = false; leftInBand = false;
+    rightCurrentY = -1; leftCurrentY = -1;
+    rightSigns = []; leftSigns = [];
   }
 
   /* -- Execute a turn -- */
@@ -783,7 +846,7 @@ object FarmScripts {
       setTimeout(function(){
         state = STATE.PLAYING; window.__csSignFarmStats.state = STATE.PLAYING;
         lastTrickTime = Date.now() + 500; inTurnBlock = false;
-        rightSigns = []; leftSigns = [];
+        resetSignCounters();
       }, RESPAWN_WAIT);
       return;
     }
@@ -798,7 +861,7 @@ object FarmScripts {
       state = STATE.PLAYING; window.__csSignFarmStats.state = STATE.PLAYING;
       lastTrickTime = Date.now() + COOLDOWN_AFTER_TURN;
       inTurnBlock = false;
-      rightSigns = []; leftSigns = [];
+      resetSignCounters();
     }, TURN_HOLD_MS + 200);
   }
 
@@ -827,18 +890,53 @@ object FarmScripts {
       if (doDetect) {
         lastDetectTs = now;
         if (captureGrayscale()) {
-          var mR = matchZone(tmplRightScaled, RIGHT_ZONE);
-          var mL = matchZone(tmplLeftScaled,  LEFT_ZONE);
-          trackSigns(rightSigns, mR, now);
-          trackSigns(leftSigns,  mL, now);
-          window.__csSignFarmStats.rightRemaining = rightSigns.length;
-          window.__csSignFarmStats.leftRemaining  = leftSigns.length;
+          /* ── Two-window detection per wall ──
+             1. COUNT WINDOW (upper): detect signs as they enter at the top.
+             2. TRIGGER BAND (lower): detect signs that have scrolled down
+                near the cart. Only the LAST sign can be here. */
+          var mR_count = matchZone(tmplRightScaled, RIGHT_ZONE, COUNT_WIN_TOP, COUNT_WIN_BOT);
+          var mL_count = matchZone(tmplLeftScaled,  LEFT_ZONE,  COUNT_WIN_TOP, COUNT_WIN_BOT);
+          trackCount('RIGHT', mR_count, now);
+          trackCount('LEFT',  mL_count, now);
 
+          var mR_band = matchZone(tmplRightScaled, RIGHT_ZONE, TRIGGER_BAND_TOP, TRIGGER_BAND_BOT);
+          var mL_band = matchZone(tmplLeftScaled,  LEFT_ZONE,  TRIGGER_BAND_TOP, TRIGGER_BAND_BOT);
+          rightInBand = (mR_band.score >= MATCH_THRESHOLD);
+          leftInBand  = (mL_band.score >= MATCH_THRESHOLD);
+
+          /* Update stats */
+          window.__csSignFarmStats.rightRemaining = rightInBand ? 1 : 0;
+          window.__csSignFarmStats.leftRemaining  = leftInBand  ? 1 : 0;
+          window.__csSignFarmStats.rightSignsSeen = rightTotalSeen;
+          window.__csSignFarmStats.leftSignsSeen  = leftTotalSeen;
+          window.__csSignFarmStats.dbgRightY = mR_band.score >= MATCH_THRESHOLD ? mR_band.y : -1;
+          window.__csSignFarmStats.dbgGrabH = grabH;
+
+          /* ── Turn trigger ──
+             Turn when a sign is in the TRIGGER BAND (it has scrolled down
+             near the cart = this is the LAST sign) AND:
+             - we've counted at least MIN_SIGNS_BEFORE_TURN signs total, AND
+             - the count has STABILIZED (no new sign for COUNT_STABLE_MS).
+             The stabilization check ensures we've seen ALL the signs for
+             this curve and the one in the trigger band is the LAST one —
+             not the first. This is what the user asked for: "detect all
+             signs, turn on the last one".
+             Direction: sign on RIGHT wall → press ArrowLeft (turn left);
+                        sign on LEFT  wall → press ArrowRight (turn right).
+             We pick the wall with more signs counted (the active curve side). */
           if (!inTurnBlock) {
-            if (rightSigns.length >= TURN_AT_REMAINING && rightSigns.length > leftSigns.length) {
+            var trigY = grabH * (TRIGGER_BAND_TOP + TRIGGER_BAND_BOT) / 2;
+            window.__csSignFarmStats.dbgTrigY = trigY;
+
+            var rightStable = (now - rightCountChangedTs) >= COUNT_STABLE_MS;
+            var leftStable  = (now - leftCountChangedTs)  >= COUNT_STABLE_MS;
+
+            if (rightInBand && rightTotalSeen >= MIN_SIGNS_BEFORE_TURN &&
+                rightStable && rightTotalSeen >= leftTotalSeen) {
               executeTurn('LEFT'); return;
             }
-            if (leftSigns.length  >= TURN_AT_REMAINING && leftSigns.length  > rightSigns.length) {
+            if (leftInBand && leftTotalSeen >= MIN_SIGNS_BEFORE_TURN &&
+                leftStable && leftTotalSeen >= rightTotalSeen) {
               executeTurn('RIGHT'); return;
             }
           }
