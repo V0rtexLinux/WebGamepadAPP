@@ -49,6 +49,14 @@ dependencies {
     implementation 'androidx.lifecycle:lifecycle-livedata-ktx:2.7.0'
     implementation 'androidx.fragment:fragment-ktx:1.6.2'
     implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
+
+    // Network stress-testing / WebSocket + HTTP client for NetworkStressTester.
+    // OkHttp 4.x is compatible with minSdk 26, JVM 1.8 and Kotlin 1.9.22.
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    // Coroutines core is pulled transitively by lifecycle-viewmodel-ktx,
+    // but we declare it explicitly so the test engine has a stable, visible API.
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'
     androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
