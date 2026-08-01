@@ -158,6 +158,9 @@ class GameplayActivity : AppCompatActivity(),
                 loginOffered = false
                 // Inject game analysis hooks early
                 view.evaluateJavascript(GameAnalyzerJS.EARLY_HOOK_SCRIPT) { _ -> }
+                // CRITICAL: patch WebGL preserveDrawingBuffer BEFORE Ruffle creates its context
+                // so that pixel-based turn arrow detection in Cart Surfer works correctly.
+                farmManager.onPageStarted(url)
             }
 
             override fun onPageFinished(view: WebView, url: String) {

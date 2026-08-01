@@ -1,639 +1,553 @@
 package com.gamemapper.services
 
+import com.gamemapper.models.MinigameType
+
 /**
- * JavaScript scripts injected into the WebView for auto-farming coins.
+ * All JavaScript farm scripts for play.cpjourney.net (Club Penguin Journey).
  *
- * Architecture:
- *  1. DETECTOR_SCRIPT — runs continuously to identify which minigame is active
- *  2. Per-game farm scripts — injected when the game is detected
- *  3. Farm bridge — Android↔JS communication via JavascriptInterface
+ * The game uses Ruffle (Flash emulator) with WebGL. Key technical requirements:
+ *  1. WebGL preserveDrawingBuffer must be forced EARLY (onPageStarted) so
+ *     readPixels() works for pixel-based turn detection.
+ *  2. Key events go to the Ruffle canvas inside <ruffle-player> shadow DOM;
+ *     composed:true lets them pierce the shadow boundary.
+ *  3. Tricks must ALTERNATE to avoid the 50% repeat-penalty.
  *
- * Supported farms (researched from cpjourney.net):
- *  • Cart Surfer    — Flip (↓+Space=100pts) + Handstand (↑+↑=80pts) pattern
- *  • Mining         — Presses 'D' key every ~5s to refresh drill
- *  • Ice Drilling   — Same as Mining but at Iceberg room
- *  • Pizza Job      — Detects pizza orders and auto-delivers
- *  • Coffee Job     — Detects coffee orders and auto-serves
- *  • Fishing        — Monitors rod state and clicks at peak
- *  • Puffle Roundup — Auto-moves puffle toward targets
- *  • Bean Counters  — Auto-catches beans pattern
+ * Confirmed trick table (CPJ Stamp Guide, rebelfederation.com):
+ *  Flip         : ↓ then Space  = 100 pts  ← highest
+ *  Handstand    : ↑ then ↑      =  80 pts
+ *  Spin R/L     : Space then ←/→=  80 pts
+ *  Run on Tracks: ↓ then ↓      =  80 pts
+ *  Leap         : Space then ↑  =  50 pts
+ *  Cart Slam    : Space then ↓  =  30 pts
+ *  Surf Jump    : ↑ then Space  =  20 pts
+ *  Turn         : ←/→           =  10 pts
+ *  Surf Turn    : ↑ then ←/→   =  ** bonus on turns
+ *
+ * Turn detection uses WebGL readPixels on the yellow/gold arrow indicator zone.
+ * Turn keys: A = go left, D = go right.
+ *
+ * Life strategy: use exactly 1 life intentionally (miss turn #CRASH_TURN)
+ * to reset the run timer and earn more coins per session.
  */
 object FarmScripts {
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  MINIGAME DETECTOR — polled every second by CoinFarmManager
+    // EARLY INJECT — must run in onPageStarted(), BEFORE Ruffle creates WebGL
     // ─────────────────────────────────────────────────────────────────────────
+    /**
+     * Intercepts HTMLCanvasElement.getContext to force preserveDrawingBuffer:true
+     * on every WebGL context. This enables gl.readPixels() for turn detection.
+     * MUST be injected on page start, not page finish.
+     */
+    val CART_SURFER_EARLY_INJECT = """
+(function() {
+  if (window.__csGLPatched) return;
+  window.__csGLPatched = true;
+  const _orig = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+    if (type === 'webgl' || type === 'webgl2') {
+      attrs = Object.assign({}, attrs || {}, { preserveDrawingBuffer: true });
+    }
+    return _orig.call(this, type, attrs);
+  };
+  console.log('[CS-Farm] WebGL patched — preserveDrawingBuffer enabled');
+})();
+""".trimIndent()
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // MINIGAME DETECTOR
+    // ─────────────────────────────────────────────────────────────────────────
     val MINIGAME_DETECTOR = """
 (function() {
-    try {
-        var result = {
-            minigame: 'NONE',
-            roomId: -1,
-            roomName: '',
-            score: 0,
-            coinsEarned: 0,
-            isPlaying: false,
-            gameState: {},
-            url: location.href,
-            timestamp: Date.now()
-        };
+  var result = { minigame: 'NONE', confidence: 0, url: location.href };
+  var hash = location.hash.toLowerCase();
+  var href = location.href.toLowerCase();
 
-        // ── URL/hash detection ──────────────────────────────────────────────
-        var url = location.href.toLowerCase();
-        var hash = location.hash.toLowerCase();
+  var ROOM_MAP = {
+    850: 'CART_SURFER', 851: 'CART_SURFER',
+    810: 'MINING', 811: 'ICE_DRILLING',
+    330: 'PIZZA_JOB', 320: 'COFFEE_JOB',
+    430: 'FISHING', 440: 'PUFFLE_ROUNDUP'
+  };
 
-        // ── Canvas presence and game state ──────────────────────────────────
-        var canvas = document.querySelector('canvas');
-        var hasCanvas = canvas !== null;
-        var rafActive = (window.__gmapper_raf_count || 0) > 8;
-
-        // ── CP Journey specific: game client exposes global objects ──────────
-        // The Flash/HTML5 game client often exposes window.penguin, window.cpClient,
-        // window.miniGame, or uses postMessage events with room/game info.
-
-        var cpClient = window.cpClient || window.CP || window.PenguinClient || null;
-        var miniGame = window.miniGame || window.currentGame || window.activeGame || null;
-        var roomId = -1;
-        var roomName = '';
-        var score = 0;
-
-        if (cpClient) {
-            try { roomId = cpClient.room || cpClient.roomId || cpClient.currentRoom || -1; } catch(e){}
-            try { roomName = cpClient.roomName || ''; } catch(e){}
-            try { score = cpClient.score || cpClient.coins || 0; } catch(e){}
-        }
-        if (miniGame) {
-            try { score = miniGame.score || miniGame.points || score; } catch(e){}
-        }
-
-        // ── DOM-based detection (game-specific elements) ────────────────────
-        var titleEl = document.querySelector('#game-title, .game-title, [data-game], #mini-game');
-        var gameTitle = titleEl ? (titleEl.textContent || titleEl.getAttribute('data-game') || '') : '';
-        gameTitle = gameTitle.toLowerCase().trim();
-
-        // ── Score element detection ──────────────────────────────────────────
-        var scoreEl = document.querySelector('#score, .score, [data-score], #coins, .coin-count');
-        if (scoreEl) {
-            var parsed = parseInt(scoreEl.textContent.replace(/[^0-9]/g, ''), 10);
-            if (!isNaN(parsed)) score = parsed;
-        }
-
-        // ── Canvas title / aria-label detection ─────────────────────────────
-        var canvasTitle = canvas ? (canvas.getAttribute('aria-label') || canvas.id || '').toLowerCase() : '';
-
-        // ── Room ID based detection (CP uses numeric room IDs) ───────────────
-        // Known room IDs from Club Penguin / CP Journey:
-        // Cart Surfer: room 804/805 or game ID 'cart_surfer'
-        // Fishing:     room 221 (Ski Lodge)
-        // Puffle:      room 400-range
-        // Mining:      room 800-range (Mine room)
-        // Jet Pack:    game launch
-        var roomMap = {
-            800: 'MINING', 801: 'MINING', 802: 'MINING', 803: 'MINING',
-            804: 'CART_SURFER', 805: 'CART_SURFER',
-            221: 'FISHING', 222: 'FISHING',
-            400: 'PUFFLE_ROUNDUP',
-            300: 'BEAN_COUNTERS', 301: 'BEAN_COUNTERS',
-            230: 'JET_PACK', 231: 'JET_PACK',
-            200: 'AQUA_GRABBER', 201: 'AQUA_GRABBER',
-            110: 'PIZZATRON', 111: 'PIZZATRON',
-            120: 'COFFEE_JOB', 121: 'COFFEE_JOB',
-            122: 'PIZZA_JOB',
-            321: 'DANCE_CONTEST',
-            809: 'ICE_DRILLING',
-            826: 'THIN_ICE',
-            834: 'ASTRO_BARRIER'
-        };
-
-        if (roomMap[roomId]) {
-            result.minigame = roomMap[roomId];
-            result.roomId = roomId;
-        }
-
-        // ── Text/title-based detection ───────────────────────────────────────
-        var detectByText = function(text) {
-            if (!text) return;
-            text = text.toLowerCase();
-            if (text.includes('cart') || text.includes('surfer')) result.minigame = 'CART_SURFER';
-            else if (text.includes('fish') || text.includes('ski lodge')) result.minigame = 'FISHING';
-            else if (text.includes('puffle') && text.includes('round')) result.minigame = 'PUFFLE_ROUNDUP';
-            else if (text.includes('bean') || text.includes('counter')) result.minigame = 'BEAN_COUNTERS';
-            else if (text.includes('jet') || text.includes('pack')) result.minigame = 'JET_PACK';
-            else if (text.includes('aqua') || text.includes('grabber')) result.minigame = 'AQUA_GRABBER';
-            else if (text.includes('pizzatron') || text.includes('pizza') && text.includes('tron')) result.minigame = 'PIZZATRON';
-            else if (text.includes('pizza') && text.includes('job')) result.minigame = 'PIZZA_JOB';
-            else if (text.includes('coffee') || text.includes('barista')) result.minigame = 'COFFEE_JOB';
-            else if (text.includes('dance') || text.includes('contest')) result.minigame = 'DANCE_CONTEST';
-            else if (text.includes('thin') && text.includes('ice')) result.minigame = 'THIN_ICE';
-            else if (text.includes('astro')) result.minigame = 'ASTRO_BARRIER';
-            else if (text.includes('mining') || text.includes('mine') && text.includes('drill')) result.minigame = 'MINING';
-            else if (text.includes('ice') && text.includes('drill')) result.minigame = 'ICE_DRILLING';
-        };
-
-        detectByText(gameTitle);
-        detectByText(canvasTitle);
-        detectByText(document.title);
-
-        // ── URL-based detection ──────────────────────────────────────────────
-        if (result.minigame === 'NONE') {
-            if (url.includes('cart') || hash.includes('cart')) result.minigame = 'CART_SURFER';
-            else if (url.includes('fish')) result.minigame = 'FISHING';
-            else if (url.includes('mine')) result.minigame = 'MINING';
-            else if (url.includes('iceberg') || url.includes('ice_berg')) result.minigame = 'ICE_DRILLING';
-        }
-
-        // ── postMessage sniffing (CP Journey uses postMessage for game events)
-        if (!window.__farm_lastMessage) window.__farm_lastMessage = '';
-        if (!window.__farm_messageHooked) {
-            window.__farm_messageHooked = true;
-            var origPM = window.dispatchEvent.bind(window);
-            window.addEventListener('message', function(e) {
-                if (e.data && typeof e.data === 'object') {
-                    window.__farm_lastMessage = JSON.stringify(e.data).substring(0, 500);
-                }
-            });
-        }
-
-        result.roomId = roomId;
-        result.roomName = roomName;
-        result.score = score;
-        result.isPlaying = hasCanvas && rafActive;
-        result.gameState = {
-            hasCanvas: hasCanvas,
-            canvasWidth: canvas ? canvas.width : 0,
-            canvasHeight: canvas ? canvas.height : 0,
-            rafCount: window.__gmapper_raf_count || 0,
-            lastMessage: window.__farm_lastMessage || '',
-            documentTitle: document.title
-        };
-
+  // 1. cpClient room-based detection (most reliable)
+  try {
+    if (window.cpClient && window.cpClient.room) {
+      var room = window.cpClient.room;
+      var id = room.id || room.room_id || room.roomId;
+      if (ROOM_MAP[id]) {
+        result.minigame = ROOM_MAP[id];
+        result.confidence = 95;
         return JSON.stringify(result);
-    } catch(err) {
-        return JSON.stringify({ minigame: 'UNKNOWN', error: err.message, url: location.href });
+      }
     }
+  } catch(e) {}
+
+  // 2. URL/hash pattern
+  var patterns = {
+    CART_SURFER: ['cart', 'surfer', 'mine'],
+    MINING:      ['mining', 'drill'],
+    PIZZA_JOB:   ['pizza'],
+    FISHING:     ['fishing', 'fish'],
+    PUFFLE_ROUNDUP: ['puffle', 'roundup']
+  };
+  for (var key in patterns) {
+    if (patterns[key].some(function(p) { return hash.includes(p) || href.includes(p); })) {
+      result.minigame = key;
+      result.confidence = 60;
+    }
+  }
+
+  // 3. Canvas + ruffle presence = in some minigame
+  if (result.minigame === 'NONE') {
+    var ruffle = document.querySelector('ruffle-player');
+    if (ruffle) {
+      result.minigame = 'UNKNOWN';
+      result.confidence = 30;
+    }
+  }
+
+  return JSON.stringify(result);
 })();
 """.trimIndent()
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  CART SURFER AUTO-FARM
-    //  Research: Flip (↓+Space=100pts), Handstand (↑+↑=80pts), Spin (Space+←/→=80pts)
-    //  Best strategy: alternate Flip and Handstand, handle turns with arrow keys
-    //  Crash trick: crash on 6th turn → returns to 4th turn (more coins)
+    // CART SURFER — FULL AUTO-FARM
     // ─────────────────────────────────────────────────────────────────────────
-
-    val CART_SURFER_FARM = """
+    /**
+     * Full automatic Cart Surfer farm.
+     *
+     * Algorithm:
+     *  – Runs at 20 Hz (every 50ms poll loop)
+     *  – Tricks: Flip(100)→Handstand(80)→SpinR(80)→RunTracks(80)→Flip→SpinL→...
+     *    alternated so no consecutive repeat → no 50% penalty
+     *  – Turn detection: samples a grid of pixels in the upper portion of the
+     *    Ruffle canvas looking for golden/yellow arrow pixels (R>185, G>155, B<90)
+     *    on the left zone vs right zone to determine A or D press
+     *  – Surf Turn on real turns: does ↑ + dir first to earn extra trick points
+     *  – Life strategy: intentionally skips one turn after CRASH_TURN turns to
+     *    use exactly 1 life and extend the run time
+     */
+    val CART_SURFER_FARM_AUTO = """
 (function() {
-    if (window.__cartFarm_running) return 'already_running';
-    window.__cartFarm_running = true;
-    window.__cartFarm_coins = 0;
-    window.__cartFarm_rounds = 0;
+  if (window.__csFarmRunning) return JSON.stringify({status:'already_running'});
+  window.__csFarmRunning = true;
 
-    // Helper: simulate keydown + keyup on the game canvas
-    function fireKey(keyCode, delay, duration) {
-        delay = delay || 0;
-        duration = duration || 80;
-        setTimeout(function() {
-            var target = document.querySelector('canvas') || document.body;
-            var downEvt = new KeyboardEvent('keydown', {
-                keyCode: keyCode, which: keyCode, bubbles: true, cancelable: true,
-                key: String.fromCharCode(keyCode)
-            });
-            target.dispatchEvent(downEvt);
-            setTimeout(function() {
-                var upEvt = new KeyboardEvent('keyup', {
-                    keyCode: keyCode, which: keyCode, bubbles: true, cancelable: true
-                });
-                target.dispatchEvent(upEvt);
-            }, duration);
-        }, delay);
+  /* ── Tuning constants ───────────────────────────────────────────────── */
+  var TRICK_INTERVAL   = 1700;  // ms between tricks
+  var TURN_HOLD_MS     = 340;   // how long to hold the turn key
+  var KEY_TAP_MS       = 85;    // tap duration for trick keys
+  var SEQ_DELAY_MS     = 90;    // delay between first+second key in a 2-key trick
+  var COOLDOWN_AFTER_TURN = 600; // ms gap after a turn before more tricks
+  var CRASH_TURN       = 6;     // intentionally miss this turn to use 1 life
+  var MAX_LIVES        = 1;     // total lives to spend intentionally
+  var RESPAWN_WAIT     = 2800;  // ms to wait after a crash before resuming
+  var LOOP_RATE        = 50;    // main loop hz (ms interval)
+
+  /* ── Arrow detection pixel thresholds ───────────────────────────────── */
+  // Yellow/gold arrows: high R, high G, low B
+  var ARROW_R_MIN  = 185;
+  var ARROW_G_MIN  = 150;
+  var ARROW_B_MAX  = 95;
+  var ARROW_SCORE_THRESHOLD = 5; // minimum matching pixels to confirm direction
+
+  /* ── State ───────────────────────────────────────────────────────────── */
+  var STATE = {
+    IDLE:     'IDLE',
+    PLAYING:  'PLAYING',
+    TURNING:  'TURNING',
+    CRASHED:  'CRASHED',
+    DONE:     'DONE'
+  };
+  var state         = STATE.IDLE;
+  var turnCount     = 0;
+  var livesUsed     = 0;
+  var trickIdx      = 0;
+  var lastTrickTime = 0;
+  var inTurnBlock   = false;   // true while executing/cooling down a turn
+  var loopId        = null;
+  var gameCanvas    = null;
+  var glCtx         = null;
+
+  /* ── Stats (readable from Android via evaluateJavascript) ───────────── */
+  window.__csFarmStats = {
+    running:    true,
+    state:      STATE.IDLE,
+    turns:      0,
+    tricks:     0,
+    livesUsed:  0,
+    lastTrick:  '',
+    lastTurnDir:'',
+    startTs:    Date.now()
+  };
+
+  /* ── Canvas / GL setup ──────────────────────────────────────────────── */
+  function findCanvas() {
+    var rp = document.querySelector('ruffle-player');
+    if (rp && rp.shadowRoot) {
+      var c = rp.shadowRoot.querySelector('canvas');
+      if (c && c.width > 100) return c;
+    }
+    var all = Array.from(document.querySelectorAll('canvas'));
+    all.sort(function(a,b){ return (b.width*b.height)-(a.width*a.height); });
+    return all[0] || null;
+  }
+
+  function ensureGL() {
+    if (glCtx && gameCanvas) return true;
+    gameCanvas = findCanvas();
+    if (!gameCanvas) return false;
+    glCtx = gameCanvas.getContext('webgl2') || gameCanvas.getContext('webgl');
+    return !!glCtx;
+  }
+
+  /* ── Key injection ──────────────────────────────────────────────────── */
+  function getTarget() {
+    return (gameCanvas || document.querySelector('ruffle-player') || document.documentElement);
+  }
+
+  function fireEvent(target, type, keyCode, key, code) {
+    var opts = { keyCode:keyCode, which:keyCode, key:key, code:code,
+                 bubbles:true, cancelable:true, composed:true };
+    target.dispatchEvent(new KeyboardEvent(type, opts));
+    // Belt-and-suspenders: also fire on window so Ruffle's top-level listener catches it
+    window.dispatchEvent(new KeyboardEvent(type, opts));
+  }
+
+  function tap(keyCode, key, code, dur) {
+    var t = getTarget();
+    fireEvent(t, 'keydown', keyCode, key, code);
+    setTimeout(function(){ fireEvent(t, 'keyup', keyCode, key, code); }, dur || KEY_TAP_MS);
+  }
+
+  function hold(keyCode, key, code, dur) {
+    var t = getTarget();
+    fireEvent(t, 'keydown', keyCode, key, code);
+    var rpt = setInterval(function(){ fireEvent(t, 'keydown', keyCode, key, code); }, 40);
+    setTimeout(function(){
+      clearInterval(rpt);
+      fireEvent(t, 'keyup', keyCode, key, code);
+    }, dur);
+  }
+
+  /* Key codes */
+  var K = {
+    LEFT : [37,'ArrowLeft','ArrowLeft'],
+    RIGHT: [39,'ArrowRight','ArrowRight'],
+    UP   : [38,'ArrowUp','ArrowUp'],
+    DOWN : [40,'ArrowDown','ArrowDown'],
+    SPACE: [32,' ','Space'],
+    A    : [65,'a','KeyA'],
+    D    : [68,'d','KeyD']
+  };
+  function t(k,d){ tap(k[0],k[1],k[2],d); }
+  function h(k,d){ hold(k[0],k[1],k[2],d); }
+
+  /* ── Trick sequence (alternated, no consecutive repeats) ─────────────
+   * Pattern: Flip(100)→Handstand(80)→SpinR(80)→RunTracks(80)→
+   *          Flip(100)→Handstand(80)→SpinL(80)→RunTracks(80) → repeat
+   * Average = (100+80+80+80+100+80+80+80)/8 = 85 pts per trick ≈ 680 pts/8
+   */
+  var TRICKS = [
+    { name:'Flip',          fn: function(){ t(K.DOWN); setTimeout(function(){ t(K.SPACE); }, SEQ_DELAY_MS); } },
+    { name:'Handstand',     fn: function(){ t(K.UP);   setTimeout(function(){ t(K.UP);    }, SEQ_DELAY_MS+40); } },
+    { name:'Spin Right',    fn: function(){ t(K.SPACE); setTimeout(function(){ t(K.RIGHT); }, SEQ_DELAY_MS); } },
+    { name:'Run on Tracks', fn: function(){ t(K.DOWN); setTimeout(function(){ t(K.DOWN);  }, SEQ_DELAY_MS+40); } },
+    { name:'Flip',          fn: function(){ t(K.DOWN); setTimeout(function(){ t(K.SPACE); }, SEQ_DELAY_MS); } },
+    { name:'Handstand',     fn: function(){ t(K.UP);   setTimeout(function(){ t(K.UP);    }, SEQ_DELAY_MS+40); } },
+    { name:'Spin Left',     fn: function(){ t(K.SPACE); setTimeout(function(){ t(K.LEFT);  }, SEQ_DELAY_MS); } },
+    { name:'Run on Tracks', fn: function(){ t(K.DOWN); setTimeout(function(){ t(K.DOWN);  }, SEQ_DELAY_MS+40); } }
+  ];
+
+  function doTrick() {
+    var trick = TRICKS[trickIdx % TRICKS.length];
+    trickIdx++;
+    trick.fn();
+    window.__csFarmStats.lastTrick = trick.name;
+    window.__csFarmStats.tricks++;
+    lastTrickTime = Date.now();
+  }
+
+  /* ── Pixel-based turn arrow detection ────────────────────────────────
+   * The turn arrows in Cart Surfer are large golden/yellow indicators.
+   * They appear in the UPPER-CENTRE area of the game view, pointing LEFT
+   * (for a left turn) or RIGHT (for a right turn).
+   *
+   * We sample a grid of pixels in two zones:
+   *   Left zone : x ∈ [12%, 32%]  y ∈ [32%, 55%]
+   *   Right zone: x ∈ [66%, 86%]  y ∈ [32%, 55%]
+   * Count of golden pixels determines direction.
+   */
+  function samplePixel(x, y) {
+    try {
+      var buf = new Uint8Array(4);
+      var fy  = gameCanvas.height - Math.round(y) - 1; // WebGL y-flip
+      glCtx.readPixels(Math.round(x), fy, 1, 1, glCtx.RGBA, glCtx.UNSIGNED_BYTE, buf);
+      return buf;
+    } catch(e) { return null; }
+  }
+
+  function isArrowPixel(px) {
+    return px && px[0] > ARROW_R_MIN && px[1] > ARROW_G_MIN && px[2] < ARROW_B_MAX && px[3] > 100;
+  }
+
+  function detectTurnDirection() {
+    if (!ensureGL()) return null;
+    var w = gameCanvas.width, h = gameCanvas.height;
+
+    // Sample grid columns and rows
+    var xLeft  = [0.12, 0.16, 0.20, 0.24, 0.28, 0.32];
+    var xRight = [0.66, 0.70, 0.74, 0.78, 0.82, 0.86];
+    var yRows  = [0.32, 0.37, 0.42, 0.47, 0.52, 0.55];
+
+    var lScore = 0, rScore = 0;
+    for (var ri = 0; ri < yRows.length; ri++) {
+      var py = h * yRows[ri];
+      for (var ci = 0; ci < xLeft.length; ci++) {
+        if (isArrowPixel(samplePixel(w * xLeft[ci],  py))) lScore++;
+        if (isArrowPixel(samplePixel(w * xRight[ci], py))) rScore++;
+      }
     }
 
-    function fireCombo(key1, key2, delay, holdMs) {
-        holdMs = holdMs || 100;
-        setTimeout(function() {
-            var target = document.querySelector('canvas') || document.body;
-            [key1, key2].forEach(function(kc) {
-                target.dispatchEvent(new KeyboardEvent('keydown', {
-                    keyCode: kc, which: kc, bubbles: true, cancelable: true
-                }));
-            });
-            setTimeout(function() {
-                [key1, key2].forEach(function(kc) {
-                    target.dispatchEvent(new KeyboardEvent('keyup', {
-                        keyCode: kc, which: kc, bubbles: true, cancelable: true
-                    }));
-                });
-            }, holdMs);
-        }, delay);
+    if (lScore >= ARROW_SCORE_THRESHOLD && lScore > rScore) return 'LEFT';
+    if (rScore >= ARROW_SCORE_THRESHOLD && rScore > lScore) return 'RIGHT';
+    return null;
+  }
+
+  /* ── Execute a turn ────────────────────────────────────────────────── */
+  function executeTurn(dir) {
+    if (inTurnBlock) return;
+    inTurnBlock = true;
+    state = STATE.TURNING;
+    turnCount++;
+    window.__csFarmStats.turns      = turnCount;
+    window.__csFarmStats.lastTurnDir = dir;
+    window.__csFarmStats.state      = STATE.TURNING;
+
+    /* Intentional crash: miss CRASH_TURN to use 1 life, extending game time */
+    if (turnCount === CRASH_TURN && livesUsed < MAX_LIVES) {
+      livesUsed++;
+      window.__csFarmStats.livesUsed = livesUsed;
+      // Don't press anything → cart crashes → 1 life used → run continues
+      state = STATE.CRASHED;
+      window.__csFarmStats.state = STATE.CRASHED;
+      setTimeout(function() {
+        state = STATE.PLAYING;
+        window.__csFarmStats.state = STATE.PLAYING;
+        lastTrickTime = Date.now() + 500;
+        inTurnBlock = false;
+      }, RESPAWN_WAIT);
+      return;
     }
 
-    // Key codes
-    var UP=38, DOWN=40, LEFT=37, RIGHT=39, SPACE=32;
+    /* Surf Turn: ↑ + direction arrow = extra points AND navigates the curve */
+    var arrowKey = (dir === 'LEFT') ? K.LEFT : K.RIGHT;
+    var turnKey  = (dir === 'LEFT') ? K.A    : K.D;
 
-    var trickIndex = 0;
-    var turnCounter = 0;
-    var TURN_INTERVAL = 3200;  // ms between turns (approximate)
-    var TRICK_INTERVAL = 900;  // ms between tricks
+    // Slightly pre-tap ↑ then hold the direction key
+    t(K.UP, 60);
+    setTimeout(function() {
+      h(arrowKey, TURN_HOLD_MS);
+      h(turnKey,  TURN_HOLD_MS);
+    }, 45);
 
-    // Trick sequence (maximizes score: Flip=100, Handstand=80, Run=80, Spin=80)
-    // Flip = DOWN + SPACE
-    // Handstand = UP + UP
-    // Run on Tracks = DOWN + DOWN
-    // Spin = SPACE + LEFT or RIGHT
-    var tricks = [
-        function() { fireCombo(DOWN, SPACE, 0, 120); },    // Flip 100pts
-        function() { fireKey(UP, 0, 80); fireKey(UP, 100, 80); }, // Handstand 80pts
-        function() { fireCombo(DOWN, SPACE, 0, 120); },    // Flip 100pts
-        function() { fireCombo(DOWN, DOWN, 0, 80); },      // Run on Tracks 80pts
-        function() { fireCombo(DOWN, SPACE, 0, 120); },    // Flip 100pts
-        function() { fireCombo(SPACE, LEFT, 0, 80); },     // Spin Left 80pts
-    ];
+    setTimeout(function() {
+      state = STATE.PLAYING;
+      window.__csFarmStats.state = STATE.PLAYING;
+      lastTrickTime = Date.now() + COOLDOWN_AFTER_TURN;
+      inTurnBlock = false;
+    }, TURN_HOLD_MS + 450);
+  }
 
-    // Turn handling — alternate left/right to navigate curves
-    var turnSide = true;
-    function handleTurn() {
-        turnCounter++;
-        var dir = turnSide ? RIGHT : LEFT;
-        turnSide = !turnSide;
-        fireKey(dir, 0, 150);
-        // On every 6th turn, crash and respawn (exploit: returns to turn 4)
-        if (turnCounter % 6 === 0) {
-            // Let it crash (don't press anything) — SPACE to respawn after crash
-            setTimeout(function() { fireKey(SPACE, 0, 80); }, 1200);
-            turnCounter = 4; // Reset to 4th turn
-        }
+  /* ── Main loop ─────────────────────────────────────────────────────── */
+  function loop() {
+    if (!window.__csFarmRunning) { clearInterval(loopId); return; }
+    if (state === STATE.DONE || state === STATE.CRASHED || state === STATE.TURNING) return;
+
+    if (state === STATE.IDLE) {
+      if (!ensureGL()) return; // canvas not ready yet
+      state = STATE.PLAYING;
+      window.__csFarmStats.state = STATE.PLAYING;
+      lastTrickTime = Date.now() + 1800; // initial wait for game to start
+      return;
     }
 
-    // Trick loop
-    var trickTimer = setInterval(function() {
-        if (!window.__cartFarm_running) { clearInterval(trickTimer); return; }
-        var trick = tricks[trickIndex % tricks.length];
-        trick();
-        trickIndex++;
-    }, TRICK_INTERVAL);
+    if (state === STATE.PLAYING) {
+      // 1. Turn detection (highest priority — ~20ms check each loop tick)
+      var dir = detectTurnDirection();
+      if (dir && !inTurnBlock) {
+        executeTurn(dir);
+        return;
+      }
 
-    // Turn loop (turns happen roughly every 3.2 seconds)
-    var turnTimer = setInterval(function() {
-        if (!window.__cartFarm_running) { clearInterval(turnTimer); return; }
-        handleTurn();
-    }, TURN_INTERVAL);
+      // 2. Trick loop
+      if (Date.now() - lastTrickTime >= TRICK_INTERVAL) {
+        doTrick();
+      }
+    }
+  }
 
-    // Score polling — detect round end and auto-restart
-    var lastScore = 0;
-    var noScoreChange = 0;
-    var scoreTimer = setInterval(function() {
-        if (!window.__cartFarm_running) { clearInterval(scoreTimer); return; }
-        var scoreEl = document.querySelector('#score, .score, [data-score]');
-        var currentScore = 0;
-        if (scoreEl) {
-            currentScore = parseInt(scoreEl.textContent.replace(/[^0-9]/g,''), 10) || 0;
-        }
-        if (currentScore !== lastScore) {
-            window.__cartFarm_coins += (currentScore - lastScore);
-            lastScore = currentScore;
-            noScoreChange = 0;
-        } else {
-            noScoreChange++;
-            // If score hasn't changed in 8 seconds, game likely ended — restart
-            if (noScoreChange > 8) {
-                noScoreChange = 0;
-                window.__cartFarm_rounds++;
-                trickIndex = 0; turnCounter = 0;
-                // Click "Play Again" button if visible
-                var playAgain = document.querySelector('[data-action="play_again"], .play-again, #play-again, button');
-                if (playAgain) playAgain.click();
-                // Or press SPACE/ENTER to restart
-                setTimeout(function() { fireKey(SPACE, 0, 80); }, 500);
-                setTimeout(function() { fireKey(13, 0, 80); }, 700); // Enter
-            }
-        }
-    }, 1000);
+  loopId = setInterval(loop, LOOP_RATE);
 
-    window.__cartFarm_stop = function() {
-        window.__cartFarm_running = false;
-        clearInterval(trickTimer);
-        clearInterval(turnTimer);
-        clearInterval(scoreTimer);
-        return { coins: window.__cartFarm_coins, rounds: window.__cartFarm_rounds };
-    };
+  /* ── Stop API ─────────────────────────────────────────────────────── */
+  window.__stopCartSurferFarm = function() {
+    clearInterval(loopId);
+    window.__csFarmRunning = false;
+    window.__csFarmStats.running = false;
+    return 'stopped';
+  };
 
-    window.__cartFarm_status = function() {
-        return JSON.stringify({
-            running: window.__cartFarm_running,
-            coins: window.__cartFarm_coins,
-            rounds: window.__cartFarm_rounds,
-            trickIndex: trickIndex,
-            turnCounter: turnCounter
-        });
-    };
-
-    return 'cart_surfer_started';
+  return JSON.stringify({ status:'started', ts: Date.now() });
 })();
 """.trimIndent()
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  MINING / ICE DRILLING AUTO-FARM
-    //  Research: Press 'D' key every ~5s (3 ticks), refresh drill continuously
+    // MINING AUTO-FARM (Ice Drilling / Regular Mining)
     // ─────────────────────────────────────────────────────────────────────────
-
     val MINING_FARM = """
 (function() {
-    if (window.__miningFarm_running) return 'already_running';
-    window.__miningFarm_running = true;
-    window.__miningFarm_coins = 0;
-    window.__miningFarm_ticks = 0;
-
-    function pressD() {
-        var target = document.querySelector('canvas') || document.body;
-        // Press 'D' key (keyCode 68)
-        target.dispatchEvent(new KeyboardEvent('keydown', { keyCode: 68, which: 68, key: 'd', bubbles: true }));
-        setTimeout(function() {
-            target.dispatchEvent(new KeyboardEvent('keyup', { keyCode: 68, which: 68, key: 'd', bubbles: true }));
-        }, 80);
-        window.__miningFarm_ticks++;
-    }
-
-    // Press D every 5 seconds (after 3 ticks ~= 15 seconds, but research says refresh after every 3 ticks)
-    // Optimal: press D every 5s to continuously refresh
-    var mineTimer = setInterval(function() {
-        if (!window.__miningFarm_running) { clearInterval(mineTimer); return; }
-        pressD();
-        // Also try clicking the drill area if present
-        var drillArea = document.querySelector('.drill, [data-action="drill"], #drill-zone');
-        if (drillArea) {
-            drillArea.click();
-        }
-    }, 5000);
-
-    // Immediately press D to start
-    pressD();
-
-    // Coin monitoring
-    var coinTimer = setInterval(function() {
-        if (!window.__miningFarm_running) { clearInterval(coinTimer); return; }
-        var scoreEl = document.querySelector('#coins, .coin-count, #score, .score, [data-coins]');
-        if (scoreEl) {
-            var val = parseInt(scoreEl.textContent.replace(/[^0-9]/g,''), 10);
-            if (!isNaN(val)) window.__miningFarm_coins = val;
-        }
-    }, 2000);
-
-    window.__miningFarm_stop = function() {
-        window.__miningFarm_running = false;
-        clearInterval(mineTimer);
-        clearInterval(coinTimer);
-        return { coins: window.__miningFarm_coins, ticks: window.__miningFarm_ticks };
-    };
-
-    window.__miningFarm_status = function() {
-        return JSON.stringify({
-            running: window.__miningFarm_running,
-            coins: window.__miningFarm_coins,
-            ticks: window.__miningFarm_ticks
-        });
-    };
-
-    return 'mining_started';
+  if (window.__miningFarmRunning) return JSON.stringify({status:'already_running'});
+  window.__miningFarmRunning = true;
+  var id = setInterval(function() {
+    if (!window.__miningFarmRunning) { clearInterval(id); return; }
+    // Press D every 5s to refresh drill / advance mining
+    var e = new KeyboardEvent('keydown',{keyCode:68,which:68,key:'d',code:'KeyD',bubbles:true,cancelable:true,composed:true});
+    (document.querySelector('ruffle-player')||document.body).dispatchEvent(e);
+    window.dispatchEvent(e);
+    setTimeout(function(){
+      var u = new KeyboardEvent('keyup',{keyCode:68,which:68,key:'d',code:'KeyD',bubbles:true,cancelable:true,composed:true});
+      (document.querySelector('ruffle-player')||document.body).dispatchEvent(u);
+    }, 80);
+  }, 5000);
+  window.__stopMiningFarm = function(){ window.__miningFarmRunning=false; clearInterval(id); return 'stopped'; };
+  return JSON.stringify({status:'started',ts:Date.now()});
 })();
 """.trimIndent()
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  PIZZA JOB AUTO-FARM
-    //  Research: Wear pizza apron+chef hat, another penguin sends pizza emote,
-    //  collect and deliver orders for coins + stamps
+    // PIZZA JOB AUTO-FARM
     // ─────────────────────────────────────────────────────────────────────────
-
     val PIZZA_JOB_FARM = """
 (function() {
-    if (window.__pizzaFarm_running) return 'already_running';
-    window.__pizzaFarm_running = true;
-    window.__pizzaFarm_orders = 0;
-    window.__pizzaFarm_coins = 0;
-
-    function clickElement(selector) {
-        var el = document.querySelector(selector);
-        if (el) { el.click(); return true; }
-        return false;
-    }
-
-    function clickAt(x, y) {
-        var canvas = document.querySelector('canvas');
-        if (!canvas) return;
-        var rect = canvas.getBoundingClientRect();
-        var realX = rect.left + x * (rect.width / (canvas.width || 760));
-        var realY = rect.top + y * (rect.height / (canvas.height || 480));
-        ['mousedown','mouseup','click'].forEach(function(type) {
-            canvas.dispatchEvent(new MouseEvent(type, {
-                clientX: realX, clientY: realY, bubbles: true, cancelable: true
-            }));
-        });
-    }
-
-    // Pizza Parlor interaction zones (approximate canvas coordinates)
-    // Order appears at counter (~380, 200), delivery zone (~380, 380)
-    var orderZone = { x: 380, y: 200 };
-    var deliveryZone = { x: 380, y: 380 };
-
-    var jobTimer = setInterval(function() {
-        if (!window.__pizzaFarm_running) { clearInterval(jobTimer); return; }
-        // Check for order indicators
-        var orderEl = document.querySelector('.order-ready, [data-order], .pizza-order, #order-indicator');
-        if (orderEl && orderEl.style.display !== 'none') {
-            // Click to collect order
-            clickAt(orderZone.x, orderZone.y);
-            setTimeout(function() {
-                // Deliver order
-                clickAt(deliveryZone.x, deliveryZone.y);
-                window.__pizzaFarm_orders++;
-            }, 1500);
-        } else {
-            // Try clicking order zone anyway (polling approach)
-            clickAt(orderZone.x, orderZone.y);
-        }
-    }, 3000);
-
-    // Send pizza emote to generate orders (helps trigger orders for other players)
-    var emoteTimer = setInterval(function() {
-        if (!window.__pizzaFarm_running) { clearInterval(emoteTimer); return; }
-        // Try to trigger pizza emote (emote 38 in CP = pizza slice)
-        var target = document.querySelector('canvas') || document.body;
-        // Press E for emote menu, then select pizza
-        target.dispatchEvent(new KeyboardEvent('keydown', { keyCode: 69, which: 69, key: 'e', bubbles: true }));
-        setTimeout(function() {
-            target.dispatchEvent(new KeyboardEvent('keyup', { keyCode: 69, which: 69, key: 'e', bubbles: true }));
-        }, 80);
-    }, 20000);
-
-    window.__pizzaFarm_stop = function() {
-        window.__pizzaFarm_running = false;
-        clearInterval(jobTimer);
-        clearInterval(emoteTimer);
-        return { orders: window.__pizzaFarm_orders };
-    };
-
-    window.__pizzaFarm_status = function() {
-        return JSON.stringify({ running: window.__pizzaFarm_running, orders: window.__pizzaFarm_orders });
-    };
-
-    return 'pizza_job_started';
+  if (window.__pizzaFarmRunning) return JSON.stringify({status:'already_running'});
+  window.__pizzaFarmRunning = true;
+  function click(x, y) {
+    var el = document.elementFromPoint(x, y) || document.body;
+    el.dispatchEvent(new MouseEvent('mousedown',{clientX:x,clientY:y,bubbles:true}));
+    el.dispatchEvent(new MouseEvent('mouseup',{clientX:x,clientY:y,bubbles:true}));
+    el.dispatchEvent(new MouseEvent('click',{clientX:x,clientY:y,bubbles:true}));
+  }
+  var step = 0;
+  var id = setInterval(function() {
+    if (!window.__pizzaFarmRunning) { clearInterval(id); return; }
+    var w = window.innerWidth, h = window.innerHeight;
+    if (step % 3 === 0) click(w*0.3, h*0.5);
+    else if (step % 3 === 1) click(w*0.7, h*0.4);
+    else click(w*0.5, h*0.7);
+    step++;
+  }, 1800);
+  window.__stopPizzaFarm = function(){ window.__pizzaFarmRunning=false; clearInterval(id); return 'stopped'; };
+  return JSON.stringify({status:'started',ts:Date.now()});
 })();
 """.trimIndent()
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  FISHING AUTO-FARM (Ski Lodge)
-    //  Cast rod → wait for bite → pull up quickly
+    // FISHING AUTO-FARM
     // ─────────────────────────────────────────────────────────────────────────
-
     val FISHING_FARM = """
 (function() {
-    if (window.__fishFarm_running) return 'already_running';
-    window.__fishFarm_running = true;
-    window.__fishFarm_catches = 0;
-    window.__fishFarm_coins = 0;
-
-    function clickAt(x, y) {
-        var canvas = document.querySelector('canvas');
-        if (!canvas) return;
-        var rect = canvas.getBoundingClientRect();
-        var realX = rect.left + x * (rect.width / (canvas.width || 760));
-        var realY = rect.top + y * (rect.height / (canvas.height || 480));
-        ['mousedown', 'mouseup', 'click'].forEach(function(type) {
-            canvas.dispatchEvent(new MouseEvent(type, {
-                clientX: realX, clientY: realY, bubbles: true, cancelable: true
-            }));
-        });
-    }
-
-    // Fishing rod position (center of canvas, where the worm/lure is)
-    var rodX = 380, rodY = 300;
-
-    var phase = 'cast';
-    var fishTimer = setInterval(function() {
-        if (!window.__fishFarm_running) { clearInterval(fishTimer); return; }
-        if (phase === 'cast') {
-            // Click to cast the rod / let the lure fall
-            clickAt(rodX, rodY);
-            phase = 'wait';
-        } else if (phase === 'wait') {
-            // Check if a fish has bitten (look for change in game state)
-            // Simple: pull up every 4 seconds (catches most fish)
-            clickAt(rodX, rodY - 150); // Pull up
-            window.__fishFarm_catches++;
-            phase = 'cast';
-        }
-    }, 4000);
-
-    window.__fishFarm_stop = function() {
-        window.__fishFarm_running = false;
-        clearInterval(fishTimer);
-        return { catches: window.__fishFarm_catches };
-    };
-
-    window.__fishFarm_status = function() {
-        return JSON.stringify({ running: window.__fishFarm_running, catches: window.__fishFarm_catches });
-    };
-
-    return 'fishing_started';
+  if (window.__fishingFarmRunning) return JSON.stringify({status:'already_running'});
+  window.__fishingFarmRunning = true;
+  function tap(kc,k,code){
+    var t=document.querySelector('ruffle-player')||document.body;
+    var d=new KeyboardEvent('keydown',{keyCode:kc,key:k,code:code,bubbles:true,composed:true});
+    var u=new KeyboardEvent('keyup',{keyCode:kc,key:k,code:code,bubbles:true,composed:true});
+    t.dispatchEvent(d); window.dispatchEvent(d);
+    setTimeout(function(){t.dispatchEvent(u);window.dispatchEvent(u);},80);
+  }
+  var phase = 0;
+  var id = setInterval(function(){
+    if (!window.__fishingFarmRunning){clearInterval(id);return;}
+    if (phase === 0) tap(32,' ','Space');       // cast
+    else if (phase === 2) tap(38,'ArrowUp','ArrowUp'); // pull up
+    phase = (phase + 1) % 4;
+  }, 2200);
+  window.__stopFishingFarm = function(){window.__fishingFarmRunning=false;clearInterval(id);return 'stopped';};
+  return JSON.stringify({status:'started',ts:Date.now()});
 })();
 """.trimIndent()
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  PUFFLE ROUNDUP AUTO-FARM
-    //  Herd puffles into the pen using mouse movement patterns
+    // PUFFLE ROUNDUP AUTO-FARM
     // ─────────────────────────────────────────────────────────────────────────
-
     val PUFFLE_ROUNDUP_FARM = """
 (function() {
-    if (window.__puffleFarm_running) return 'already_running';
-    window.__puffleFarm_running = true;
-    window.__puffleFarm_rounds = 0;
-
-    var canvas = document.querySelector('canvas');
-    if (!canvas) { window.__puffleFarm_running = false; return 'no_canvas'; }
-    var rect = canvas.getBoundingClientRect();
-
-    function moveMouseTo(x, y) {
-        var realX = rect.left + x;
-        var realY = rect.top + y;
-        canvas.dispatchEvent(new MouseEvent('mousemove', {
-            clientX: realX, clientY: realY, bubbles: true
-        }));
-    }
-
-    // Sweep pattern: move mouse in arcs to herd puffles toward the pen (right side)
-    var sweepX = 100, sweepY = 240;
-    var sweepDir = 1;
-    var sweepTimer = setInterval(function() {
-        if (!window.__puffleFarm_running) { clearInterval(sweepTimer); return; }
-        // Move mouse in a herding arc pattern
-        rect = canvas.getBoundingClientRect();
-        sweepX += sweepDir * 8;
-        sweepY += Math.sin(Date.now() / 800) * 12;
-        // Bounce at edges
-        if (sweepX > rect.width - 100) { sweepDir = -1; window.__puffleFarm_rounds++; }
-        if (sweepX < 100) { sweepDir = 1; }
-        sweepY = Math.max(100, Math.min(rect.height - 100, sweepY));
-        moveMouseTo(sweepX, sweepY);
-    }, 80);
-
-    window.__puffleFarm_stop = function() {
-        window.__puffleFarm_running = false;
-        clearInterval(sweepTimer);
-        return { rounds: window.__puffleFarm_rounds };
-    };
-
-    window.__puffleFarm_status = function() {
-        return JSON.stringify({ running: window.__puffleFarm_running, rounds: window.__puffleFarm_rounds });
-    };
-
-    return 'puffle_roundup_started';
+  if (window.__puffleRunning) return JSON.stringify({status:'already_running'});
+  window.__puffleRunning = true;
+  var dirs = [[39,0],[40,0],[37,0],[38,0]]; var di=0;
+  function tap(kc){
+    var t=document.querySelector('ruffle-player')||document.body;
+    var d=new KeyboardEvent('keydown',{keyCode:kc,bubbles:true,composed:true});
+    t.dispatchEvent(d);window.dispatchEvent(d);
+    setTimeout(function(){
+      var u=new KeyboardEvent('keyup',{keyCode:kc,bubbles:true,composed:true});
+      t.dispatchEvent(u);window.dispatchEvent(u);
+    },120);
+  }
+  var id=setInterval(function(){
+    if(!window.__puffleRunning){clearInterval(id);return;}
+    tap(dirs[di%dirs.length][0]);di++;
+  },1200);
+  window.__stopPuffleRoundup=function(){window.__puffleRunning=false;clearInterval(id);return 'stopped';};
+  return JSON.stringify({status:'started',ts:Date.now()});
 })();
 """.trimIndent()
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  STOP ALL FARMS
+    // STOP ALL FARMS
     // ─────────────────────────────────────────────────────────────────────────
-
     val STOP_ALL_FARMS = """
 (function() {
-    var results = {};
-    if (window.__cartFarm_stop) { results.cartSurfer = window.__cartFarm_stop(); window.__cartFarm_running = false; }
-    if (window.__miningFarm_stop) { results.mining = window.__miningFarm_stop(); window.__miningFarm_running = false; }
-    if (window.__pizzaFarm_stop) { results.pizza = window.__pizzaFarm_stop(); window.__pizzaFarm_running = false; }
-    if (window.__fishFarm_stop) { results.fishing = window.__fishFarm_stop(); window.__fishFarm_running = false; }
-    if (window.__puffleFarm_stop) { results.puffle = window.__puffleFarm_stop(); window.__puffleFarm_running = false; }
-    if (window.__iceFarm_stop) { results.ice = window.__iceFarm_stop(); window.__iceFarm_running = false; }
-    return JSON.stringify(results);
+  var stopped = [];
+  if (window.__stopCartSurferFarm)  { window.__stopCartSurferFarm();  stopped.push('cart_surfer'); }
+  if (window.__stopMiningFarm)      { window.__stopMiningFarm();      stopped.push('mining'); }
+  if (window.__stopPizzaFarm)       { window.__stopPizzaFarm();       stopped.push('pizza'); }
+  if (window.__stopFishingFarm)     { window.__stopFishingFarm();     stopped.push('fishing'); }
+  if (window.__stopPuffleRoundup)   { window.__stopPuffleRoundup();   stopped.push('puffle'); }
+  window.__csFarmRunning     = false;
+  window.__miningFarmRunning = false;
+  window.__pizzaFarmRunning  = false;
+  window.__fishingFarmRunning= false;
+  window.__puffleRunning     = false;
+  return JSON.stringify({ stopped: stopped });
 })();
 """.trimIndent()
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  GET ALL FARM STATUS
+    // STATUS POLL
     // ─────────────────────────────────────────────────────────────────────────
-
     val GET_FARM_STATUS = """
 (function() {
-    var status = {
-        cartSurfer: window.__cartFarm_status ? JSON.parse(window.__cartFarm_status()) : null,
-        mining: window.__miningFarm_status ? JSON.parse(window.__miningFarm_status()) : null,
-        pizza: window.__pizzaFarm_status ? JSON.parse(window.__pizzaFarm_status()) : null,
-        fishing: window.__fishFarm_status ? JSON.parse(window.__fishFarm_status()) : null,
-        puffle: window.__puffleFarm_status ? JSON.parse(window.__puffleFarm_status()) : null,
-        totalCoins: (window.__cartFarm_coins || 0) + (window.__miningFarm_coins || 0)
-    };
-    return JSON.stringify(status);
+  return JSON.stringify({
+    cartSurfer: window.__csFarmStats || null,
+    cartRunning: !!window.__csFarmRunning,
+    miningRunning: !!window.__miningFarmRunning,
+    pizzaRunning: !!window.__pizzaFarmRunning,
+    fishingRunning: !!window.__fishingFarmRunning,
+    puffleRunning: !!window.__puffleRunning
+  });
 })();
 """.trimIndent()
 
-    /** Get the farm script for a given minigame type */
-    fun scriptForMinigame(type: com.gamemapper.models.MinigameType): String? = when (type) {
-        com.gamemapper.models.MinigameType.CART_SURFER   -> CART_SURFER_FARM
-        com.gamemapper.models.MinigameType.MINING        -> MINING_FARM
-        com.gamemapper.models.MinigameType.ICE_DRILLING  -> MINING_FARM // same mechanic
-        com.gamemapper.models.MinigameType.PIZZA_JOB     -> PIZZA_JOB_FARM
-        com.gamemapper.models.MinigameType.FISHING       -> FISHING_FARM
-        com.gamemapper.models.MinigameType.PUFFLE_ROUNDUP -> PUFFLE_ROUNDUP_FARM
+    // ─────────────────────────────────────────────────────────────────────────
+    // Dispatch helpers
+    // ─────────────────────────────────────────────────────────────────────────
+    fun scriptForMinigame(type: MinigameType): String? = when (type) {
+        MinigameType.CART_SURFER                     -> CART_SURFER_FARM_AUTO
+        MinigameType.MINING, MinigameType.ICE_DRILLING -> MINING_FARM
+        MinigameType.PIZZA_JOB, MinigameType.COFFEE_JOB -> PIZZA_JOB_FARM
+        MinigameType.FISHING                         -> FISHING_FARM
+        MinigameType.PUFFLE_ROUNDUP                  -> PUFFLE_ROUNDUP_FARM
         else -> null
     }
 }
