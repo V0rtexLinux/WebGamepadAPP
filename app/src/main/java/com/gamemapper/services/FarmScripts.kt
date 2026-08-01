@@ -788,16 +788,18 @@ object FarmScripts {
       return;
     }
 
+    /* In Club Penguin Journey Cart Surfer, turning is done with the ARROW
+       keys only: ArrowLeft = turn left, ArrowRight = turn right.
+       A/D and the Surf-Turn (Up) are NOT used for turning — they were
+       causing the cart to miss the curve. */
     var arrowKey = (dir === 'LEFT') ? K.LEFT : K.RIGHT;
-    var turnKey  = (dir === 'LEFT') ? K.A    : K.D;
-    t(K.UP, 60);
-    setTimeout(function(){ h(arrowKey, TURN_HOLD_MS); h(turnKey, TURN_HOLD_MS); }, 45);
+    h(arrowKey, TURN_HOLD_MS);
     setTimeout(function(){
       state = STATE.PLAYING; window.__csSignFarmStats.state = STATE.PLAYING;
       lastTrickTime = Date.now() + COOLDOWN_AFTER_TURN;
       inTurnBlock = false;
       rightSigns = []; leftSigns = [];
-    }, TURN_HOLD_MS + 450);
+    }, TURN_HOLD_MS + 200);
   }
 
   /* -- Main loop (throttled: heavy detection runs at most every DETECT_INTERVAL_MS) -- */
