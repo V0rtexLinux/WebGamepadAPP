@@ -486,7 +486,7 @@ object FarmScripts {
      all, and only turn when the count has stabilized (no new sign for a
      while) AND a sign is in the trigger band at the bottom of the screen
      (i.e. it's the final one and the curve is imminent). */
-  var MIN_SIGNS_BEFORE_TURN = 1;    /* min signs seen before allowing a turn (keep = 1) */
+  var MIN_SIGNS_BEFORE_TURN = 2;    /* min signs seen before allowing a turn (keep = 1) */
   var TRIGGER_BAND_TOP    = 0.58;   /* top of the trigger band (fraction of grab height) */
   var TRIGGER_BAND_BOT    = 0.82;   /* bottom of the trigger band */
 
