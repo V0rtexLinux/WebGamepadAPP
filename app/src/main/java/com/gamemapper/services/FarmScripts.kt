@@ -454,6 +454,259 @@ object FarmScripts {
      * Tricks remain alternated (Flip->Handstand->SpinR->RunTracks->...) to avoid
      * the 50% repeat penalty, and the 1-life crash strategy is preserved.
      */
+    // ──────────────────────────────────────────────────────────────────────
+    // CART SURFER — V2 (ported from jMatthewIsland/Cart-Bot Java bot)
+    // ──────────────────────────────────────────────────────────────────────
+    /**
+     * Lightweight pixel-sampling auto-farm ported from the original Cart-Bot
+     * (https://github.com/jMatthewIsland/Cart-Bot — CartBotv2.java).
+     *
+     * Original Java algorithm:
+     *   1. Sample a center pixel at (49% W, 43% H). If R+G+B < 100 → game over.
+     *   2. Sample left & right pixels near screen center (±W/128, at 43% H).
+     *   3. Compare total RGB of left vs right:
+     *        leftTotal > rightTotal → wall/track is brighter on left → turn LEFT
+     *        rightTotal > leftTotal → wall/track is brighter on right → turn RIGHT
+     *   4. Turn = tap DOWN (brake) + hold LEFT/RIGHT for 800ms.
+     *   5. Trick = tap DOWN twice with 200ms gap (cart trick).
+     *   6. Loop every ~1s: trick + turn-check.
+     *
+     * This is FAR lighter than template matching (3 pixel reads vs full NCC scan)
+     * and won't freeze the WebView. The original bot was designed for desktop
+     * Club Penguin; adapted here for CPJ via Ruffle WebGL canvas in WebView.
+     *
+     * Adaptations for WebView/CPJ:
+     *   - Uses gl.readPixels on the Ruffle WebGL canvas instead of java.awt.Robot
+     *   - Arrow keys (ArrowLeft/ArrowRight) for turning — NOT A/D
+     *   - WebGL Y-flip: fy = canvas.height - y - 1
+     *   - TURN_HOLD_MS tunable (450ms safe range per user feedback)
+     *   - Tricks use the same alternated sequence as the sign-based farm
+     *   - Life/crash strategy preserved
+     */
+    val CART_SURFER_FARM_V2 = """
+(function() {
+  if (window.__csV2FarmRunning) return JSON.stringify({status:'already_running'});
+  window.__csV2FarmRunning = true;
+
+  /* -- Tuning constants (ported from Cart-Bot + user feedback) -- */
+  var LOOP_INTERVAL     = 1000;   /* ms between loop ticks (original: ~1s) */
+  var TURN_HOLD_MS      = 450;    /* hold arrow key (user: 450-500ms safe) */
+  var TRICK_INTERVAL    = 1700;   /* ms between tricks */
+  var CRASH_TURN        = 6;      /* intentionally miss this turn to use 1 life */
+  var MAX_LIVES         = 1;
+  var RESPAWN_WAIT      = 2800;
+  var KEY_TAP_MS        = 85;
+
+  /* Pixel sampling positions (from original Cart-Bot) */
+  var TEST_SPOT_X_FRAC  = 0.49;   /* center-ish X for "is game alive" check */
+  var TEST_SPOT_Y_FRAC  = 0.43;   /* Y height for all samples */
+  var SIDE_OFFSET_FRAC  = 1/128;  /* ±this fraction of width from center */
+  var ALIVE_THRESHOLD   = 100;    /* R+G+B >= this → game is running */
+
+  /* -- State -- */
+  var STATE = { IDLE:'IDLE', PLAYING:'PLAYING', TURNING:'TURNING',
+                CRASHED:'CRASHED', DONE:'DONE' };
+  var state = STATE.IDLE;
+  var turnCount = 0, livesUsed = 0, trickIdx = 0;
+  var lastTrickTime = 0, inTurnBlock = false, loopId = null;
+  var gameCanvas = null, glCtx = null;
+
+  window.__csV2FarmStats = {
+    running: true, state: STATE.IDLE, turns: 0, tricks: 0, livesUsed: 0,
+    lastTurnDir: '', lastTrick: '', lastLeftTotal: 0, lastRightTotal: 0,
+    lastTestTotal: 0, startTs: Date.now()
+  };
+
+  /* -- Canvas / GL setup -- */
+  function findCanvas() {
+    var rp = document.querySelector('ruffle-player');
+    if (rp && rp.shadowRoot) {
+      var c = rp.shadowRoot.querySelector('canvas');
+      if (c && c.width > 100) return c;
+    }
+    var all = Array.prototype.slice.call(document.querySelectorAll('canvas'));
+    all.sort(function(a,b){ return (b.width*b.height)-(a.width*a.height); });
+    return all[0] || null;
+  }
+  function ensureGL() {
+    if (glCtx && gameCanvas) return true;
+    gameCanvas = findCanvas();
+    if (!gameCanvas) return false;
+    glCtx = gameCanvas.getContext('webgl2') || gameCanvas.getContext('webgl');
+    return !!glCtx;
+  }
+
+  /* -- Key injection -- */
+  function getTarget() {
+    return (gameCanvas || document.querySelector('ruffle-player') || document.documentElement);
+  }
+  function fireEvent(target, type, keyCode, key, code) {
+    var opts = { keyCode:keyCode, which:keyCode, key:key, code:code,
+                 bubbles:true, cancelable:true, composed:true };
+    target.dispatchEvent(new KeyboardEvent(type, opts));
+    window.dispatchEvent(new KeyboardEvent(type, opts));
+  }
+  function tap(kc, k, code, dur) {
+    var t = getTarget();
+    fireEvent(t, 'keydown', kc, k, code);
+    setTimeout(function(){ fireEvent(t, 'keyup', kc, k, code); }, dur || KEY_TAP_MS);
+  }
+  function hold(kc, k, code, dur) {
+    var t = getTarget();
+    fireEvent(t, 'keydown', kc, k, code);
+    var rpt = setInterval(function(){ fireEvent(t, 'keydown', kc, k, code); }, 40);
+    setTimeout(function(){ clearInterval(rpt); fireEvent(t, 'keyup', kc, k, code); }, dur);
+  }
+  var K = {
+    LEFT:[37,'ArrowLeft','ArrowLeft'], RIGHT:[39,'ArrowRight','ArrowRight'],
+    UP:[38,'ArrowUp','ArrowUp'], DOWN:[40,'ArrowDown','ArrowDown'],
+    SPACE:[32,' ','Space'], A:[65,'a','KeyA'], D:[68,'d','KeyD']
+  };
+  function t(k,d){ tap(k[0],k[1],k[2],d); }
+  function h(k,d){ hold(k[0],k[1],k[2],d); }
+
+  /* -- Pixel sampling (WebGL readPixels with Y-flip) -- */
+  function samplePixel(x, y) {
+    try {
+      var buf = new Uint8Array(4);
+      var fy = gameCanvas.height - Math.round(y) - 1; /* WebGL Y-flip */
+      glCtx.readPixels(Math.round(x), fy, 1, 1, glCtx.RGBA, glCtx.UNSIGNED_BYTE, buf);
+      return buf;
+    } catch(e) { return null; }
+  }
+  function pixelTotal(px) {
+    if (!px) return 0;
+    return px[0] + px[1] + px[2]; /* R + G + B */
+  }
+
+  /* -- Trick sequence (alternated, same as other farms) -- */
+  var TRICKS = [
+    { name:'Flip',      fn: function(){ t(K.DOWN,80); t(K.SPACE,80); } },
+    { name:'Handstand', fn: function(){ t(K.DOWN,80); t(K.UP,80); } },
+    { name:'SpinR',     fn: function(){ t(K.DOWN,80); t(K.RIGHT,80); } },
+    { name:'RunTracks', fn: function(){ t(K.SPACE,80); t(K.UP,80); } },
+    { name:'Flip2',     fn: function(){ t(K.DOWN,80); t(K.SPACE,80); } },
+    { name:'SpinL',     fn: function(){ t(K.DOWN,80); t(K.LEFT,80); } }
+  ];
+  function doTrick() {
+    var trick = TRICKS[trickIdx % TRICKS.length];
+    trickIdx++;
+    trick.fn();
+    window.__csV2FarmStats.lastTrick = trick.name;
+    window.__csV2FarmStats.tricks++;
+    lastTrickTime = Date.now();
+  }
+
+  /* -- Turn logic (ported from Cart-Bot.turn) -- */
+  /* Original: if leftTotal > rightTotal → press LEFT (800ms)
+   *           if rightTotal > leftTotal → press RIGHT (800ms)
+   * In CPJ: ArrowLeft = turn left, ArrowRight = turn right.
+   * Also taps DOWN first (brake, like original). */
+  function executeTurn(dir) {
+    if (inTurnBlock) return;
+    inTurnBlock = true;
+    state = STATE.TURNING;
+    turnCount++;
+    window.__csV2FarmStats.turns = turnCount;
+    window.__csV2FarmStats.lastTurnDir = dir;
+    window.__csV2FarmStats.state = STATE.TURNING;
+
+    /* Intentional crash: miss CRASH_TURN to use 1 life, extend game time */
+    if (turnCount === CRASH_TURN && livesUsed < MAX_LIVES) {
+      livesUsed++;
+      window.__csV2FarmStats.livesUsed = livesUsed;
+      state = STATE.CRASHED;
+      window.__csV2FarmStats.state = STATE.CRASHED;
+      setTimeout(function() {
+        state = STATE.PLAYING;
+        window.__csV2FarmStats.state = STATE.PLAYING;
+        lastTrickTime = Date.now() + 500;
+        inTurnBlock = false;
+      }, RESPAWN_WAIT);
+      return;
+    }
+
+    /* Brake (DOWN tap) then hold the turn arrow — same as original Cart-Bot */
+    t(K.DOWN, 50);
+    var arrowKey = (dir === 'LEFT') ? K.LEFT : K.RIGHT;
+    h(arrowKey, TURN_HOLD_MS);
+    setTimeout(function() {
+      state = STATE.PLAYING;
+      window.__csV2FarmStats.state = STATE.PLAYING;
+      lastTrickTime = Date.now() + 300;
+      inTurnBlock = false;
+    }, TURN_HOLD_MS + 200);
+  }
+
+  /* -- Main loop (ported from Cart-Bot.main) -- */
+  function loop() {
+    if (!window.__csV2FarmRunning) { clearInterval(loopId); return; }
+    if (state === STATE.DONE || state === STATE.CRASHED || state === STATE.TURNING) return;
+
+    if (state === STATE.IDLE) {
+      if (!ensureGL()) return;
+      state = STATE.PLAYING;
+      window.__csV2FarmStats.state = STATE.PLAYING;
+      lastTrickTime = Date.now() + 1800;
+      return;
+    }
+
+    if (state === STATE.PLAYING) {
+      var w = gameCanvas.width, hgt = gameCanvas.height;
+
+      /* 1. Test spot — is the game still alive? */
+      var testPx = samplePixel(w * TEST_SPOT_X_FRAC, hgt * TEST_SPOT_Y_FRAC);
+      var testTotal = pixelTotal(testPx);
+      window.__csV2FarmStats.lastTestTotal = testTotal;
+
+      if (testTotal < ALIVE_THRESHOLD) {
+        /* Game over / black screen — stop */
+        state = STATE.DONE;
+        window.__csV2FarmStats.state = STATE.DONE;
+        return;
+      }
+
+      /* 2. Sample left & right pixels near center (original Cart-Bot logic) */
+      var leftX  = (w / 2) - (w * SIDE_OFFSET_FRAC);
+      var rightX = (w / 2) + (w * SIDE_OFFSET_FRAC);
+      var sampleY = hgt * TEST_SPOT_Y_FRAC;
+
+      var leftPx  = samplePixel(leftX, sampleY);
+      var rightPx = samplePixel(rightX, sampleY);
+      var leftTotal  = pixelTotal(leftPx);
+      var rightTotal = pixelTotal(rightPx);
+
+      window.__csV2FarmStats.lastLeftTotal = leftTotal;
+      window.__csV2FarmStats.lastRightTotal = rightTotal;
+
+      /* 3. Determine turn direction (original Cart-Bot comparison) */
+      if (!inTurnBlock) {
+        if (leftTotal > rightTotal) {
+          executeTurn('LEFT');
+          return;
+        } else if (rightTotal > leftTotal) {
+          executeTurn('RIGHT');
+          return;
+        }
+      }
+
+      /* 4. Trick (alternated, if enough time has passed) */
+      if (Date.now() - lastTrickTime >= TRICK_INTERVAL) doTrick();
+    }
+  }
+  loopId = setInterval(loop, LOOP_INTERVAL);
+
+  /* -- Stop API -- */
+  window.__stopCartSurferV2Farm = function() {
+    clearInterval(loopId);
+    window.__csV2FarmRunning = false;
+    window.__csV2FarmStats.running = false;
+    return 'stopped';
+  };
+  return JSON.stringify({ status:'started', ts: Date.now() });
+})();
+""".trimIndent()
+
     val CART_SURFER_FARM_SIGN = """
 (function() {
   if (window.__csSignFarmRunning) return JSON.stringify({status:'already_running'});
@@ -1068,12 +1321,14 @@ object FarmScripts {
   var stopped = [];
   if (window.__stopCartSurferFarm)  { window.__stopCartSurferFarm();  stopped.push('cart_surfer'); }
   if (window.__stopCartSurferSignFarm) { window.__stopCartSurferSignFarm(); stopped.push('cart_surfer_sign'); }
+  if (window.__stopCartSurferV2Farm) { window.__stopCartSurferV2Farm(); stopped.push('cart_surfer_v2'); }
   if (window.__stopMiningFarm)      { window.__stopMiningFarm();      stopped.push('mining'); }
   if (window.__stopPizzaFarm)       { window.__stopPizzaFarm();       stopped.push('pizza'); }
   if (window.__stopFishingFarm)     { window.__stopFishingFarm();     stopped.push('fishing'); }
   if (window.__stopPuffleRoundup)   { window.__stopPuffleRoundup();   stopped.push('puffle'); }
   window.__csFarmRunning     = false;
   window.__csSignFarmRunning = false;
+  window.__csV2FarmRunning   = false;
   window.__miningFarmRunning = false;
   window.__pizzaFarmRunning  = false;
   window.__fishingFarmRunning= false;
@@ -1090,8 +1345,10 @@ object FarmScripts {
   return JSON.stringify({
     cartSurfer: window.__csFarmStats || null,
     cartSignFarm: window.__csSignFarmStats || null,
+    cartV2Farm: window.__csV2FarmStats || null,
     cartRunning: !!window.__csFarmRunning,
     cartSignRunning: !!window.__csSignFarmRunning,
+    cartV2Running: !!window.__csV2FarmRunning,
     miningRunning: !!window.__miningFarmRunning,
     pizzaRunning: !!window.__pizzaFarmRunning,
     fishingRunning: !!window.__fishingFarmRunning,
@@ -1104,7 +1361,7 @@ object FarmScripts {
     // Dispatch helpers
     // ─────────────────────────────────────────────────────────────────────────
     fun scriptForMinigame(type: MinigameType): String? = when (type) {
-        MinigameType.CART_SURFER                       -> CART_SURFER_FARM_SIGN
+        MinigameType.CART_SURFER                       -> CART_SURFER_FARM_V2
         MinigameType.MINING, MinigameType.ICE_DRILLING -> MINING_FARM
         MinigameType.PIZZA_JOB, MinigameType.COFFEE_JOB -> PIZZA_JOB_FARM
         MinigameType.FISHING                         -> FISHING_FARM
