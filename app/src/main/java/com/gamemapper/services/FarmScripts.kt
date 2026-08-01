@@ -418,6 +418,387 @@ object FarmScripts {
     // ─────────────────────────────────────────────────────────────────────────
     // MINING AUTO-FARM (Ice Drilling / Regular Mining)
     // ─────────────────────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════════════
+    // CART SURFER — SIGN-BASED AUTO-FARM (IMAGE / BASE64 TEMPLATE MATCHING)
+    // ═════════════════════════════════════════════════════════════════════════════
+    /**
+     * Full automatic Cart Surfer farm using IMAGE-based sign detection instead of
+     * color sampling. This is the recommended script — it matches a cropped PNG of
+     * the in-game yellow/black chevron turn sign (embedded as base64) against the
+     * live Ruffle canvas every loop tick, counts the repeated signs that scroll
+     * toward the player before a curve, and presses A (left) or D (right) when only
+     * 2 signs remain in the countdown.
+     *
+     * How it works (per the user's spec):
+     *  – A cropped template of the RIGHT-wall sign is embedded as base64.
+     *    RIGHT-wall chevron points LEFT  → the curve goes LEFT  → press A.
+     *  – A horizontally-flipped copy is the LEFT-wall sign template.
+     *    LEFT-wall  chevron points RIGHT → the curve goes RIGHT → press D.
+     *  – Every loop tick we draw the game canvas into an offscreen canvas, convert
+     *    a downscaled grayscale copy, and run a normalized cross-correlation
+     *    (TM_CCOEFF_NORMED-style) against each template inside the wall zones.
+     *  – Signs repeat 4–6 times along the tunnel before each curve. We track each
+     *    sign with a temporal cooldown so the same on-screen sign is only counted
+     *    once as it scrolls past; a NEW sign (one that wasn't matched recently) is
+     *    pushed onto a per-direction queue.
+     *  – When the queue length reaches the configured TURN_AT_REMAINING (default 2),
+     *    meaning 2 signs are still ahead, the app presses the turn key (A or D) so
+     *    the cart takes the curve in time. The Surf Turn trick (up + dir) is used
+     *    for bonus points.
+     *
+     * Performance: the full-res screenshot test scans both walls in ~43 ms; the
+     * smaller in-game Ruffle canvas (~800x360) scans both walls in ~22 ms, well
+     * within the 50 ms loop budget.
+     *
+     * Keys: A = turn left, D = turn right (same as the color-based script).
+     * Tricks remain alternated (Flip->Handstand->SpinR->RunTracks->...) to avoid
+     * the 50% repeat penalty, and the 1-life crash strategy is preserved.
+     */
+    val CART_SURFER_FARM_SIGN = """
+(function() {
+  if (window.__csSignFarmRunning) return JSON.stringify({status:'already_running'});
+  window.__csSignFarmRunning = true;
+
+  /* -- Tuning constants -- */
+  var TRICK_INTERVAL      = 1700;
+  var TURN_HOLD_MS        = 340;
+  var KEY_TAP_MS          = 85;
+  var SEQ_DELAY_MS        = 90;
+  var COOLDOWN_AFTER_TURN = 600;
+  var CRASH_TURN          = 6;
+  var MAX_LIVES           = 1;
+  var RESPAWN_WAIT        = 2800;
+  var LOOP_RATE           = 50;
+
+  /* Sign-detection tuning */
+  var MATCH_THRESHOLD     = 0.55;
+  var TURN_AT_REMAINING   = 2;
+  var SIGN_MIN_SPACING_PX = 60;
+  var SIGN_COOLDOWN_MS    = 250;
+  var MAX_QUEUE           = 8;
+  var DOWNSCALE           = 2;
+  var SEARCH_STEP         = 2;
+
+  var RIGHT_ZONE = { x0:0.52, x1:0.78, y0:0.18, y1:0.80 };
+  var LEFT_ZONE  = { x0:0.22, x1:0.48, y0:0.18, y1:0.80 };
+
+  /* -- Embedded base64 templates --
+     sign_right_template = original crop of the right-wall chevron (points LEFT).
+     sign_left_template  = horizontally-flipped copy (points RIGHT). */
+  var SIGN_RIGHT_B64 = "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";
+  var SIGN_LEFT_B64  = "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";
+
+  /* -- State -- */
+  var STATE = { IDLE:'IDLE', PLAYING:'PLAYING', TURNING:'TURNING',
+                CRASHED:'CRASHED', DONE:'DONE' };
+  var state = STATE.IDLE;
+  var turnCount = 0, livesUsed = 0, trickIdx = 0, lastTrickTime = 0;
+  var inTurnBlock = false, loopId = null;
+  var gameCanvas = null, glCtx = null;
+
+  var rightSigns = [];
+  var leftSigns  = [];
+  var lastDir = null;
+  var thPad = 40;
+
+  window.__csSignFarmStats = {
+    running:true, state:STATE.IDLE, turns:0, tricks:0, livesUsed:0,
+    lastTrick:'', lastTurnDir:'',
+    rightSignsSeen:0, leftSignsSeen:0,
+    rightRemaining:0, leftRemaining:0,
+    startTs:Date.now()
+  };
+
+  /* -- Canvas / GL setup -- */
+  function findCanvas() {
+    var rp = document.querySelector('ruffle-player');
+    if (rp && rp.shadowRoot) {
+      var c = rp.shadowRoot.querySelector('canvas');
+      if (c && c.width > 100) return c;
+    }
+    var all = Array.prototype.slice.call(document.querySelectorAll('canvas'));
+    all.sort(function(a,b){ return (b.width*b.height)-(a.width*a.height); });
+    return all[0] || null;
+  }
+  function ensureGL() {
+    if (glCtx && gameCanvas) return true;
+    gameCanvas = findCanvas();
+    if (!gameCanvas) return false;
+    glCtx = gameCanvas.getContext('webgl2') || gameCanvas.getContext('webgl');
+    return !!glCtx;
+  }
+
+  /* -- Template loading (once) -- */
+  var tmplRight = null, tmplLeft = null;
+  var offCanvas = document.createElement('canvas');
+  var offCtx = offCanvas.getContext('2d');
+
+  function loadTemplate(b64) {
+    return new Promise(function(resolve){
+      var img = new Image();
+      img.onload = function(){
+        offCanvas.width = img.width; offCanvas.height = img.height;
+        offCtx.drawImage(img, 0, 0);
+        var d = offCtx.getImageData(0, 0, img.width, img.height).data;
+        var g = new Float32Array(img.width * img.height);
+        for (var i=0, p=0; i<d.length; i+=4, p++)
+          g[p] = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+        var mean = 0; for (var k=0;k<g.length;k++) mean += g[k]; mean /= g.length;
+        var denom = 0; for (var j=0;j<g.length;j++){ var dv=g[j]-mean; denom += dv*dv; }
+        denom = Math.sqrt(denom);
+        resolve({ gray:g, w:img.width, h:img.height, mean:mean, denom:denom });
+      };
+      img.onerror = function(){ resolve(null); };
+      img.src = 'data:image/png;base64,' + b64;
+    });
+  }
+
+  var templatesReady = false;
+  Promise.all([loadTemplate(SIGN_RIGHT_B64), loadTemplate(SIGN_LEFT_B64)])
+    .then(function(res){ tmplRight = res[0]; tmplLeft = res[1]; templatesReady = true; });
+
+  /* -- Key injection -- */
+  function getTarget() {
+    return (gameCanvas || document.querySelector('ruffle-player') || document.documentElement);
+  }
+  function fireEvent(target, type, keyCode, key, code) {
+    var opts = { keyCode:keyCode, which:keyCode, key:key, code:code,
+                 bubbles:true, cancelable:true, composed:true };
+    target.dispatchEvent(new KeyboardEvent(type, opts));
+    window.dispatchEvent(new KeyboardEvent(type, opts));
+  }
+  function tap(kc, k, code, dur) {
+    var t = getTarget();
+    fireEvent(t, 'keydown', kc, k, code);
+    setTimeout(function(){ fireEvent(t, 'keyup', kc, k, code); }, dur || KEY_TAP_MS);
+  }
+  function hold(kc, k, code, dur) {
+    var t = getTarget();
+    fireEvent(t, 'keydown', kc, k, code);
+    var rpt = setInterval(function(){ fireEvent(t, 'keydown', kc, k, code); }, 40);
+    setTimeout(function(){ clearInterval(rpt); fireEvent(t, 'keyup', kc, k, code); }, dur);
+  }
+  var K = {
+    LEFT:[37,'ArrowLeft','ArrowLeft'], RIGHT:[39,'ArrowRight','ArrowRight'],
+    UP:[38,'ArrowUp','ArrowUp'], DOWN:[40,'ArrowDown','ArrowDown'],
+    SPACE:[32,' ','Space'], A:[65,'a','KeyA'], D:[68,'d','KeyD']
+  };
+  function t(k,d){ tap(k[0],k[1],k[2],d); }
+  function h(k,d){ hold(k[0],k[1],k[2],d); }
+
+  /* -- Trick sequence (alternated) -- */
+  var TRICKS = [
+    { name:'Flip',          fn:function(){ t(K.DOWN); setTimeout(function(){ t(K.SPACE); }, SEQ_DELAY_MS); } },
+    { name:'Handstand',     fn:function(){ t(K.UP);   setTimeout(function(){ t(K.UP);    }, SEQ_DELAY_MS+40); } },
+    { name:'Spin Right',    fn:function(){ t(K.SPACE); setTimeout(function(){ t(K.RIGHT); }, SEQ_DELAY_MS); } },
+    { name:'Run on Tracks', fn:function(){ t(K.DOWN); setTimeout(function(){ t(K.DOWN);  }, SEQ_DELAY_MS+40); } },
+    { name:'Flip',          fn:function(){ t(K.DOWN); setTimeout(function(){ t(K.SPACE); }, SEQ_DELAY_MS); } },
+    { name:'Handstand',     fn:function(){ t(K.UP);   setTimeout(function(){ t(K.UP);    }, SEQ_DELAY_MS+40); } },
+    { name:'Spin Left',     fn:function(){ t(K.SPACE); setTimeout(function(){ t(K.LEFT);  }, SEQ_DELAY_MS); } },
+    { name:'Run on Tracks', fn:function(){ t(K.DOWN); setTimeout(function(){ t(K.DOWN);  }, SEQ_DELAY_MS+40); } }
+  ];
+  function doTrick() {
+    var trick = TRICKS[trickIdx % TRICKS.length]; trickIdx++;
+    trick.fn();
+    window.__csSignFarmStats.lastTrick = trick.name;
+    window.__csSignFarmStats.tricks++;
+    lastTrickTime = Date.now();
+  }
+
+  /* -- Image capture + grayscale (downscaled) -- */
+  var grabCanvas = document.createElement('canvas');
+  var grabCtx = grabCanvas.getContext('2d');
+  var grabGray = null, grabW = 0, grabH = 0;
+
+  function captureGrayscale() {
+    if (!gameCanvas) return false;
+    var sw = Math.floor(gameCanvas.width / DOWNSCALE);
+    var sh = Math.floor(gameCanvas.height / DOWNSCALE);
+    if (sw < 10 || sh < 10) return false;
+    if (grabCanvas.width !== sw || grabCanvas.height !== sh) {
+      grabCanvas.width = sw; grabCanvas.height = sh;
+      grabGray = new Float32Array(sw * sh);
+      grabW = sw; grabH = sh;
+    }
+    try {
+      grabCtx.drawImage(gameCanvas, 0, 0, sw, sh);
+    } catch(e) { return false; }
+    var d = grabCtx.getImageData(0, 0, sw, sh).data;
+    for (var i=0, p=0; i<d.length; i+=4, p++)
+      grabGray[p] = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+    return true;
+  }
+
+  /* -- Template matching -- */
+  var tmplRightScaled = null, tmplLeftScaled = null;
+  function scaleTemplate(tmpl) {
+    if (!tmpl) return null;
+    var nw = Math.floor(tmpl.w / DOWNSCALE);
+    var nh = Math.floor(tmpl.h / DOWNSCALE);
+    if (nw < 4 || nh < 4) return null;
+    var out = new Float32Array(nw * nh);
+    for (var y=0; y<nh; y++) {
+      for (var x=0; x<nw; x++) {
+        var sum=0, cnt=0;
+        for (var dy=0; dy<DOWNSCALE && (y*DOWNSCALE+dy)<tmpl.h; dy++) {
+          var row = (y*DOWNSCALE+dy)*tmpl.w;
+          for (var dx=0; dx<DOWNSCALE && (x*DOWNSCALE+dx)<tmpl.w; dx++) {
+            sum += tmpl.gray[row + x*DOWNSCALE + dx]; cnt++;
+          }
+        }
+        out[y*nw + x] = sum / cnt;
+      }
+    }
+    var mean=0; for (var k=0;k<out.length;k++) mean += out[k]; mean /= out.length;
+    var denom=0; for (var j=0;j<out.length;j++){ var dv=out[j]-mean; denom += dv*dv; }
+    denom = Math.sqrt(denom);
+    return { gray:out, w:nw, h:nh, mean:mean, denom:denom };
+  }
+  function ensureScaledTemplates() {
+    if (!tmplRightScaled && tmplRight) tmplRightScaled = scaleTemplate(tmplRight);
+    if (!tmplLeftScaled  && tmplLeft)  tmplLeftScaled  = scaleTemplate(tmplLeft);
+  }
+
+  function matchZone(tmpl, zone) {
+    if (!tmpl || !grabGray) return { score:0, x:0, y:0 };
+    var x0 = Math.floor(grabW * zone.x0), x1 = Math.floor(grabW * zone.x1);
+    var y0 = Math.floor(grabH * zone.y0), y1 = Math.floor(grabH * zone.y1);
+    var tw = tmpl.w, th = tmpl.h, tg = tmpl.gray, tMean = tmpl.mean, tDenom = tmpl.denom;
+    if (tDenom < 1e-6) return { score:0, x:0, y:0 };
+    var bestScore = -Infinity, bestX = 0, bestY = 0;
+    for (var y=y0; y+th <= y1; y += SEARCH_STEP) {
+      for (var x=x0; x+tw <= x1; x += SEARCH_STEP) {
+        var sMean = 0;
+        for (var ty=0; ty<th; ty++) {
+          var srow = (y+ty)*grabW + x;
+          for (var tx=0; tx<tw; tx++) sMean += grabGray[srow + tx];
+        }
+        sMean /= tg.length;
+        var cross = 0, sDenom = 0;
+        for (var ty2=0; ty2<th; ty2++) {
+          var srow2 = (y+ty2)*grabW + x;
+          for (var tx2=0; tx2<tw; tx2++) {
+            var s = grabGray[srow2 + tx2] - sMean;
+            var tt = tg[ty2*tw + tx2] - tMean;
+            cross += s*tt; sDenom += s*s;
+          }
+        }
+        sDenom = Math.sqrt(sDenom);
+        var score = (sDenom < 1e-6) ? 0 : cross / (sDenom * tDenom);
+        if (score > bestScore) { bestScore = score; bestX = x; bestY = y; }
+      }
+    }
+    return { score: bestScore, x: bestX, y: bestY };
+  }
+
+  /* -- Sign tracking -- */
+  function trackSigns(queue, match, now) {
+    if (match.score < MATCH_THRESHOLD) return;
+    for (var i = queue.length - 1; i >= 0; i--) {
+      if (now - queue[i].t > SIGN_COOLDOWN_MS * 3) queue.splice(i, 1);
+    }
+    var isNew = true;
+    for (var j=0; j<queue.length; j++) {
+      if (Math.abs(queue[j].x - match.x) < SIGN_MIN_SPACING_PX &&
+          Math.abs(queue[j].y - match.y) < SIGN_MIN_SPACING_PX) {
+        queue[j].x = match.x; queue[j].y = match.y; queue[j].t = now;
+        isNew = false; break;
+      }
+    }
+    if (isNew) {
+      queue.push({ x: match.x, y: match.y, t: now });
+      if (queue.length > MAX_QUEUE) queue.shift();
+    }
+    var maxY = grabH * 0.80;
+    for (var k = queue.length - 1; k >= 0; k--) {
+      if (queue[k].y > maxY + thPad) queue.splice(k, 1);
+    }
+  }
+
+  /* -- Execute a turn -- */
+  function executeTurn(dir) {
+    if (inTurnBlock) return;
+    inTurnBlock = true; state = STATE.TURNING; turnCount++;
+    window.__csSignFarmStats.turns = turnCount;
+    window.__csSignFarmStats.lastTurnDir = dir;
+    window.__csSignFarmStats.state = STATE.TURNING;
+    lastDir = dir;
+
+    if (turnCount === CRASH_TURN && livesUsed < MAX_LIVES) {
+      livesUsed++;
+      window.__csSignFarmStats.livesUsed = livesUsed;
+      state = STATE.CRASHED; window.__csSignFarmStats.state = STATE.CRASHED;
+      setTimeout(function(){
+        state = STATE.PLAYING; window.__csSignFarmStats.state = STATE.PLAYING;
+        lastTrickTime = Date.now() + 500; inTurnBlock = false;
+        rightSigns = []; leftSigns = [];
+      }, RESPAWN_WAIT);
+      return;
+    }
+
+    var arrowKey = (dir === 'LEFT') ? K.LEFT : K.RIGHT;
+    var turnKey  = (dir === 'LEFT') ? K.A    : K.D;
+    t(K.UP, 60);
+    setTimeout(function(){ h(arrowKey, TURN_HOLD_MS); h(turnKey, TURN_HOLD_MS); }, 45);
+    setTimeout(function(){
+      state = STATE.PLAYING; window.__csSignFarmStats.state = STATE.PLAYING;
+      lastTrickTime = Date.now() + COOLDOWN_AFTER_TURN;
+      inTurnBlock = false;
+      rightSigns = []; leftSigns = [];
+    }, TURN_HOLD_MS + 450);
+  }
+
+  /* -- Main loop -- */
+  function loop() {
+    if (!window.__csSignFarmRunning) { clearInterval(loopId); return; }
+    if (state === STATE.DONE || state === STATE.CRASHED || state === STATE.TURNING) return;
+
+    if (state === STATE.IDLE) {
+      if (!ensureGL() || !templatesReady) return;
+      ensureScaledTemplates();
+      state = STATE.PLAYING; window.__csSignFarmStats.state = STATE.PLAYING;
+      lastTrickTime = Date.now() + 1800;
+      return;
+    }
+
+    if (state === STATE.PLAYING) {
+      if (captureGrayscale()) {
+        var now = Date.now();
+        var mR = matchZone(tmplRightScaled, RIGHT_ZONE);
+        var mL = matchZone(tmplLeftScaled,  LEFT_ZONE);
+        trackSigns(rightSigns, mR, now);
+        trackSigns(leftSigns,  mL, now);
+        window.__csSignFarmStats.rightRemaining = rightSigns.length;
+        window.__csSignFarmStats.leftRemaining  = leftSigns.length;
+
+        if (!inTurnBlock) {
+          if (rightSigns.length >= TURN_AT_REMAINING && rightSigns.length > leftSigns.length) {
+            executeTurn('LEFT'); return;
+          }
+          if (leftSigns.length  >= TURN_AT_REMAINING && leftSigns.length  > rightSigns.length) {
+            executeTurn('RIGHT'); return;
+          }
+        }
+      }
+      if (Date.now() - lastTrickTime >= TRICK_INTERVAL) doTrick();
+    }
+  }
+  loopId = setInterval(loop, LOOP_RATE);
+
+  /* -- Stop API -- */
+  window.__stopCartSurferSignFarm = function() {
+    clearInterval(loopId);
+    window.__csSignFarmRunning = false;
+    window.__csSignFarmStats.running = false;
+    return 'stopped';
+  };
+  return JSON.stringify({ status:'started', ts: Date.now() });
+})();
+""".trimIndent()
+
+    // ═════════════════════════════════════════════════════════════════════════════
+    // MINING AUTO-FARM (Ice Drilling / Regular Mining)
+    // ═════════════════════════════════════════════════════════════════════════════
     val MINING_FARM = """
 (function() {
   if (window.__miningFarmRunning) return JSON.stringify({status:'already_running'});
@@ -524,11 +905,13 @@ object FarmScripts {
 (function() {
   var stopped = [];
   if (window.__stopCartSurferFarm)  { window.__stopCartSurferFarm();  stopped.push('cart_surfer'); }
+  if (window.__stopCartSurferSignFarm) { window.__stopCartSurferSignFarm(); stopped.push('cart_surfer_sign'); }
   if (window.__stopMiningFarm)      { window.__stopMiningFarm();      stopped.push('mining'); }
   if (window.__stopPizzaFarm)       { window.__stopPizzaFarm();       stopped.push('pizza'); }
   if (window.__stopFishingFarm)     { window.__stopFishingFarm();     stopped.push('fishing'); }
   if (window.__stopPuffleRoundup)   { window.__stopPuffleRoundup();   stopped.push('puffle'); }
   window.__csFarmRunning     = false;
+  window.__csSignFarmRunning = false;
   window.__miningFarmRunning = false;
   window.__pizzaFarmRunning  = false;
   window.__fishingFarmRunning= false;
@@ -544,7 +927,9 @@ object FarmScripts {
 (function() {
   return JSON.stringify({
     cartSurfer: window.__csFarmStats || null,
+    cartSignFarm: window.__csSignFarmStats || null,
     cartRunning: !!window.__csFarmRunning,
+    cartSignRunning: !!window.__csSignFarmRunning,
     miningRunning: !!window.__miningFarmRunning,
     pizzaRunning: !!window.__pizzaFarmRunning,
     fishingRunning: !!window.__fishingFarmRunning,
@@ -557,11 +942,17 @@ object FarmScripts {
     // Dispatch helpers
     // ─────────────────────────────────────────────────────────────────────────
     fun scriptForMinigame(type: MinigameType): String? = when (type) {
-        MinigameType.CART_SURFER                     -> CART_SURFER_FARM_AUTO
+        MinigameType.CART_SURFER                       -> CART_SURFER_FARM_SIGN
         MinigameType.MINING, MinigameType.ICE_DRILLING -> MINING_FARM
         MinigameType.PIZZA_JOB, MinigameType.COFFEE_JOB -> PIZZA_JOB_FARM
         MinigameType.FISHING                         -> FISHING_FARM
         MinigameType.PUFFLE_ROUNDUP                  -> PUFFLE_ROUNDUP_FARM
         else -> null
+    }
+
+    /** Fallback to the legacy color-based Cart Surfer script if desired. */
+    fun scriptForMinigameColor(type: MinigameType): String? = when (type) {
+        MinigameType.CART_SURFER -> CART_SURFER_FARM_AUTO
+        else -> scriptForMinigame(type)
     }
 }
