@@ -145,11 +145,13 @@ object FarmScripts {
   var LOOP_RATE        = 50;    // main loop hz (ms interval)
 
   /* ── Arrow detection pixel thresholds ───────────────────────────────── */
-  // Yellow/gold arrows: high R, high G, low B
-  var ARROW_R_MIN  = 185;
-  var ARROW_G_MIN  = 150;
-  var ARROW_B_MAX  = 95;
-  var ARROW_SCORE_THRESHOLD = 5; // minimum matching pixels to confirm direction
+  // The turn sign is a YELLOW/BLACK road-chevron (like a ← or → curve warning).
+  // Confirmed from in-game screenshots: the yellow is pure amber with very low blue.
+  // Measured approx: R~230-255, G~170-215, B~0-45 (not R>185/B<95 as first estimated).
+  var ARROW_R_MIN  = 200;
+  var ARROW_G_MIN  = 155;
+  var ARROW_B_MAX  = 55;   // KEY FIX: pure yellow has almost no blue component
+  var ARROW_SCORE_THRESHOLD = 4; // pixels needed to confirm direction
 
   /* ── State ───────────────────────────────────────────────────────────── */
   var STATE = {
@@ -268,49 +270,61 @@ object FarmScripts {
     lastTrickTime = Date.now();
   }
 
-  /* ── Pixel-based turn arrow detection ────────────────────────────────
-   * The turn arrows in Cart Surfer are large golden/yellow indicators.
-   * They appear in the UPPER-CENTRE area of the game view, pointing LEFT
-   * (for a left turn) or RIGHT (for a right turn).
+  /* ── Pixel-based turn sign detection ────────────────────────────────
+   * Confirmed from in-game screenshots:
    *
-   * We sample a grid of pixels in two zones:
-   *   Left zone : x ∈ [12%, 32%]  y ∈ [32%, 55%]
-   *   Right zone: x ∈ [66%, 86%]  y ∈ [32%, 55%]
-   * Count of golden pixels determines direction.
+   *  SIGN ON LEFT WALL  (x≈28-50%, y≈28-65%) → chevron points RIGHT → press D
+   *  SIGN ON RIGHT WALL (x≈60-82%, y≈30-65%) → chevron points LEFT  → press A
+   *
+   * The sign is a standard road "curve ahead" chevron: bright amber-yellow (#FFD700
+   * area) stripes on black.  We sample a 6×7 pixel grid in each wall zone.
+   * WebGL origin is BOTTOM-LEFT, so we flip Y: fy = canvas.height - y - 1.
    */
   function samplePixel(x, y) {
     try {
       var buf = new Uint8Array(4);
-      var fy  = gameCanvas.height - Math.round(y) - 1; // WebGL y-flip
+      var fy  = gameCanvas.height - Math.round(y) - 1; // WebGL Y-flip
       glCtx.readPixels(Math.round(x), fy, 1, 1, glCtx.RGBA, glCtx.UNSIGNED_BYTE, buf);
       return buf;
     } catch(e) { return null; }
   }
 
   function isArrowPixel(px) {
-    return px && px[0] > ARROW_R_MIN && px[1] > ARROW_G_MIN && px[2] < ARROW_B_MAX && px[3] > 100;
+    // Pure amber-yellow: high R, high G, very low B (confirmed from screenshots)
+    return px && px[3] > 80
+              && px[0] > ARROW_R_MIN
+              && px[1] > ARROW_G_MIN
+              && px[2] < ARROW_B_MAX;
   }
 
   function detectTurnDirection() {
     if (!ensureGL()) return null;
     var w = gameCanvas.width, h = gameCanvas.height;
 
-    // Sample grid columns and rows
-    var xLeft  = [0.12, 0.16, 0.20, 0.24, 0.28, 0.32];
-    var xRight = [0.66, 0.70, 0.74, 0.78, 0.82, 0.86];
-    var yRows  = [0.32, 0.37, 0.42, 0.47, 0.52, 0.55];
+    // LEFT wall zone  → RIGHT turn (D key)
+    // Columns x: 24%..50%, rows y: 28%..62%
+    var xSignLeft  = [0.24, 0.29, 0.34, 0.38, 0.43, 0.48];
 
-    var lScore = 0, rScore = 0;
+    // RIGHT wall zone → LEFT turn (A key)
+    // Columns x: 59%..84%, rows y: 30%..65%
+    var xSignRight = [0.59, 0.64, 0.68, 0.73, 0.78, 0.83];
+
+    // Shared row samples covering where the sign appears vertically
+    var yRows = [0.28, 0.33, 0.38, 0.43, 0.48, 0.54, 0.62];
+
+    var lWall = 0, rWall = 0;
     for (var ri = 0; ri < yRows.length; ri++) {
       var py = h * yRows[ri];
-      for (var ci = 0; ci < xLeft.length; ci++) {
-        if (isArrowPixel(samplePixel(w * xLeft[ci],  py))) lScore++;
-        if (isArrowPixel(samplePixel(w * xRight[ci], py))) rScore++;
+      for (var ci = 0; ci < xSignLeft.length; ci++) {
+        if (isArrowPixel(samplePixel(w * xSignLeft[ci],  py))) lWall++;
+        if (isArrowPixel(samplePixel(w * xSignRight[ci], py))) rWall++;
       }
     }
 
-    if (lScore >= ARROW_SCORE_THRESHOLD && lScore > rScore) return 'LEFT';
-    if (rScore >= ARROW_SCORE_THRESHOLD && rScore > lScore) return 'RIGHT';
+    // CRITICAL: sign on LEFT wall  → turn RIGHT (D)
+    //           sign on RIGHT wall → turn LEFT  (A)
+    if (lWall >= ARROW_SCORE_THRESHOLD && lWall > rWall) return 'RIGHT';
+    if (rWall >= ARROW_SCORE_THRESHOLD && rWall > lWall) return 'LEFT';
     return null;
   }
 
