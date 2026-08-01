@@ -1,5 +1,6 @@
 package com.gamemapper.services
 
+import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.webkit.WebView
@@ -22,7 +23,8 @@ import com.gamemapper.models.MinigameType
  */
 class CoinFarmManager(
     private val webView: WebView,
-    private val listener: FarmListener
+    private val listener: FarmListener,
+    private val context: Context
 ) {
 
     interface FarmListener {
@@ -57,6 +59,23 @@ class CoinFarmManager(
             if (!isRunning) return
             pollFarmStatus()
             handler.postDelayed(this, STATUS_INTERVAL_MS)
+        }
+    }
+
+    /** Cached Cart Surfer V3 bot script loaded from assets/cart_surfer_karltroid_bot.js */
+    private var cartSurferV3Script: String? = null
+
+    /** Loads the external Cart Surfer bot JS from assets (Karltroid hybrid bot). */
+    private fun loadCartSurferV3Script(): String? {
+        cartSurferV3Script?.let { return it }
+        return try {
+            context.assets.open("cart_surfer_karltroid_bot.js").bufferedReader().use { reader ->
+                val script = reader.readText()
+                cartSurferV3Script = script
+                script
+            }
+        } catch (e: Exception) {
+            null
         }
     }
 
@@ -141,7 +160,13 @@ class CoinFarmManager(
     }
 
     private fun launchFarm(type: MinigameType) {
-        val script = FarmScripts.scriptForMinigame(type) ?: return
+        // Cart Surfer uses the external Karltroid hybrid bot from assets
+        val script = if (type == MinigameType.CART_SURFER) {
+            loadCartSurferV3Script() ?: FarmScripts.scriptForMinigame(type)
+        } else {
+            FarmScripts.scriptForMinigame(type)
+        }
+        if (script.isNullOrBlank()) return
         webView.evaluateJavascript(script) { result ->
             val clean = result?.unescape() ?: ""
             if (clean.contains("started") || clean.contains("running")) {
@@ -161,8 +186,10 @@ class CoinFarmManager(
                 val json    = raw.unescape()
                 val session = currentSession ?: return@evaluateJavascript
 
-                // Read Cart Surfer stats
-                val csStats = extractObject(json, "cartSurfer")
+                // Read Cart Surfer stats (V3 Karltroid bot preferred, fallback to V2)
+                val csStats = extractObject(json, "cartV3Farm")
+                    ?: extractObject(json, "cartV2Farm")
+                    ?: extractObject(json, "cartSurfer")
                 if (csStats != null) {
                     val tricks  = extractInt(csStats, "tricks") ?: 0
                     val turns   = extractInt(csStats, "turns")  ?: 0

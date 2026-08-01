@@ -1322,6 +1322,7 @@ object FarmScripts {
   if (window.__stopCartSurferFarm)  { window.__stopCartSurferFarm();  stopped.push('cart_surfer'); }
   if (window.__stopCartSurferSignFarm) { window.__stopCartSurferSignFarm(); stopped.push('cart_surfer_sign'); }
   if (window.__stopCartSurferV2Farm) { window.__stopCartSurferV2Farm(); stopped.push('cart_surfer_v2'); }
+  if (window.__stopCartSurferV3Farm) { window.__stopCartSurferV3Farm(); stopped.push('cart_surfer_v3'); }
   if (window.__stopMiningFarm)      { window.__stopMiningFarm();      stopped.push('mining'); }
   if (window.__stopPizzaFarm)       { window.__stopPizzaFarm();       stopped.push('pizza'); }
   if (window.__stopFishingFarm)     { window.__stopFishingFarm();     stopped.push('fishing'); }
@@ -1329,6 +1330,7 @@ object FarmScripts {
   window.__csFarmRunning     = false;
   window.__csSignFarmRunning = false;
   window.__csV2FarmRunning   = false;
+  window.__csV3FarmRunning   = false;
   window.__miningFarmRunning = false;
   window.__pizzaFarmRunning  = false;
   window.__fishingFarmRunning= false;
@@ -1346,9 +1348,11 @@ object FarmScripts {
     cartSurfer: window.__csFarmStats || null,
     cartSignFarm: window.__csSignFarmStats || null,
     cartV2Farm: window.__csV2FarmStats || null,
+    cartV3Farm: window.__csV3FarmStats || null,
     cartRunning: !!window.__csFarmRunning,
     cartSignRunning: !!window.__csSignFarmRunning,
     cartV2Running: !!window.__csV2FarmRunning,
+    cartV3Running: !!window.__csV3FarmRunning,
     miningRunning: !!window.__miningFarmRunning,
     pizzaRunning: !!window.__pizzaFarmRunning,
     fishingRunning: !!window.__fishingFarmRunning,
